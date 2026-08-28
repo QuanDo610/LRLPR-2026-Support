@@ -205,3 +205,18 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# ==============================================================================
+# ML / Deep Learning & Dataset specific ignore rules
+# ==============================================================================
+/dataset/
+/data/
+/results/
+/kaggle_results/
+/kaggle_kernel/
+/experiments/
+*.pth
+*.pt
+*.onnx
+*.log
+.DS_Store
