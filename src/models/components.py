@@ -64,16 +64,19 @@ class AttentionFusion(nn.Module):
             nn.Conv2d(channels // 8, 1, kernel_size=1)
         )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, num_frames: int = 5) -> torch.Tensor:
         """
         Args:
             x: Feature maps from all frames. Shape: [Batch * Frames, C, H, W]
+            num_frames: Number of frames per sequence.
         Returns:
             Fused feature map. Shape: [Batch, C, H, W]
         """
         total_frames, c, h, w = x.size()
-        num_frames = 5  # Fixed based on dataset
         batch_size = total_frames // num_frames
+
+        if num_frames == 1:
+            return x.view(batch_size, c, h, w)
 
         # Reshape to [Batch, Frames, C, H, W]
         x_view = x.view(batch_size, num_frames, c, h, w)
