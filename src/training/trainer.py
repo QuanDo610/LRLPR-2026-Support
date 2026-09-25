@@ -53,8 +53,10 @@ class Trainer:
             steps_per_epoch=len(train_loader),
             epochs=config.EPOCHS
         )
-        use_cuda = (self.device.type == 'cuda')
-        self.scaler = GradScaler('cuda', enabled=use_cuda)
+        self.device_type: str = self.device.type if self.device.type in ['cuda', 'mps', 'cpu'] else 'cpu'
+        self.autocast_enabled: bool = (self.device.type in ['cuda', 'mps'])
+        self.use_cuda_scaler: bool = (self.device.type == 'cuda')
+        self.scaler: GradScaler = GradScaler('cuda', enabled=self.use_cuda_scaler)
         
         # Tracking
         self.best_acc = 0.0
@@ -82,10 +84,7 @@ class Trainer:
             
             self.optimizer.zero_grad(set_to_none=True)
             
-            device_type = self.device.type if self.device.type in ['cuda', 'mps', 'cpu'] else 'cpu'
-            autocast_enabled = (self.device.type in ['cuda', 'mps'])
-            
-            with autocast(device_type=device_type, enabled=autocast_enabled):
+            with autocast(device_type=self.device_type, enabled=self.autocast_enabled):
                 preds = self.model(images)
                 preds_permuted = preds.permute(1, 0, 2)
                 input_lengths = torch.full(
@@ -145,19 +144,29 @@ class Trainer:
             for images, targets, target_lengths, labels_text, track_ids in self.val_loader:
                 images = images.to(self.device)
                 targets = targets.to(self.device)
-                preds = self.model(images)
                 
-                input_lengths = torch.full(
-                    (images.size(0),),
-                    preds.size(1),
-                    dtype=torch.long
-                )
-                loss = self.criterion(
-                    preds.permute(1, 0, 2),
-                    targets,
-                    input_lengths,
-                    target_lengths
-                )
+                with autocast(device_type=self.device_type, enabled=self.autocast_enabled):
+                    preds = self.model(images)
+                    preds_permuted = preds.permute(1, 0, 2)
+                    input_lengths = torch.full(
+                        (images.size(0),),
+                        preds.size(1),
+                        dtype=torch.long
+                    )
+                    if self.device.type == 'mps':
+                        loss = self.criterion(
+                            preds_permuted.cpu(),
+                            targets.cpu(),
+                            input_lengths,
+                            target_lengths
+                        )
+                    else:
+                        loss = self.criterion(
+                            preds_permuted,
+                            targets,
+                            input_lengths,
+                            target_lengths
+                        )
                 val_loss += loss.item()
 
                 # Decode predictions
@@ -256,7 +265,8 @@ class Trainer:
         with torch.no_grad():
             for images, _, _, _, track_ids in loader:
                 images = images.to(self.device)
-                preds = self.model(images)
+                with autocast(device_type=self.device_type, enabled=self.autocast_enabled):
+                    preds = self.model(images)
                 
                 decoded_list = decode_with_confidence(preds, self.idx2char)
                 for i, (pred_text, conf) in enumerate(decoded_list):
@@ -279,7 +289,8 @@ class Trainer:
         with torch.no_grad():
             for images, _, _, _, track_ids in tqdm(test_loader, desc="Test Inference"):
                 images = images.to(self.device)
-                preds = self.model(images)
+                with autocast(device_type=self.device_type, enabled=self.autocast_enabled):
+                    preds = self.model(images)
                 decoded_list = decode_with_confidence(preds, self.idx2char)
                 
                 for i, (pred_text, conf) in enumerate(decoded_list):

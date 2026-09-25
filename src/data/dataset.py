@@ -6,6 +6,7 @@ import random
 from typing import Any, Dict, List, Tuple
 
 import cv2
+import numpy as np
 import torch
 from torch.utils.data import Dataset
 from tqdm import tqdm
@@ -38,6 +39,7 @@ class MultiFrameDataset(Dataset):
         augmentation_level: str = "full",
         is_test: bool = False,
         full_train: bool = False,
+        return_hr: bool = False,
     ):
         """
         Args:
@@ -52,6 +54,7 @@ class MultiFrameDataset(Dataset):
             augmentation_level: 'full' or 'light' augmentation for training.
             is_test: If True, load test data without labels (for submission).
             full_train: If True, use all tracks for training (no val split).
+            return_hr: If True, also returns the HR tensor (for joint SR training).
         """
         self.mode = mode
         self.samples: List[Dict[str, Any]] = []
@@ -99,6 +102,22 @@ class MultiFrameDataset(Dataset):
             self._index_samples(selected_tracks)
             print(f"-> Total: {len(self.samples)} samples.")
 
+    @staticmethod
+    def get_track_unique_id(track_path: str) -> str:
+        """Get globally unique identifier for a track including its scenario/subset.
+        
+        Examples:
+            'dataset/data/train/Scenario-A/Mercosur/track_04378' -> 'Scenario-A/Mercosur/track_04378'
+            'dataset/data/train/Scenario-B/track_00001' -> 'Scenario-B/track_00001'
+        """
+        norm = os.path.normpath(track_path)
+        for sc in ["Scenario-A", "Scenario-B"]:
+            if sc in norm:
+                idx = norm.find(sc)
+                return norm[idx:]
+        parts = norm.split(os.sep)
+        return os.path.join(parts[-2], parts[-1]) if len(parts) >= 2 else os.path.basename(track_path)
+
     def _load_or_create_split(
         self,
         all_tracks: List[str],
@@ -122,7 +141,10 @@ class MultiFrameDataset(Dataset):
                 val_ids = set()
 
             for t in all_tracks:
-                if os.path.basename(t) in val_ids:
+                unique_id = self.get_track_unique_id(t)
+                base_name = os.path.basename(t)
+                # Match by unique_id, or if legacy split, match base_name ONLY if from Scenario-B
+                if unique_id in val_ids or (base_name in val_ids and "Scenario-B" in t):
                     val_tracks.append(t)
                 else:
                     train_tracks.append(t)
@@ -155,10 +177,10 @@ class MultiFrameDataset(Dataset):
             val_set = set(val_tracks)
             train_tracks = [t for t in all_tracks if t not in val_set]
             
-            # Save track IDs (folder names)
+            # Save unique track IDs (scenario + folder)
             os.makedirs(os.path.dirname(self.val_split_file), exist_ok=True)
             with open(self.val_split_file, 'w') as f:
-                json.dump([os.path.basename(t) for t in val_tracks], f, indent=2)
+                json.dump([self.get_track_unique_id(t) for t in val_tracks], f, indent=2)
 
         return train_tracks, val_tracks
 
@@ -242,18 +264,38 @@ class MultiFrameDataset(Dataset):
         is_synthetic = item['is_synthetic']
         track_id = item['track_id']
         
-        images_list = []
+        # Load all frames for this track
+        raw_images = []
         for p in img_paths:
-            image = cv2.imread(p, cv2.IMREAD_COLOR)
-            image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-            
-            # Apply degradation first (if synthetic), before any transform
-            if is_synthetic and self.degrade:
-                image = self.degrade(image=image)['image']
-            
-            # Apply transform (augmented for training, clean for validation/test)
-            image = self.transform(image=image)['image']
-            images_list.append(image)
+            img = cv2.imread(p, cv2.IMREAD_COLOR)
+            if img is None:
+                img = np.zeros((self.img_height, self.img_width, 3), dtype=np.uint8)
+            else:
+                img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                img = cv2.resize(img, (self.img_width, self.img_height))
+            raw_images.append(img)
+
+        num_frames = len(raw_images)
+        if num_frames == 0:
+            raw_images = [np.zeros((self.img_height, self.img_width, 3), dtype=np.uint8) for _ in range(5)]
+            num_frames = 5
+
+        # 1. Apply degradation if synthetic (coherently across multi-frame if supported)
+        if is_synthetic and self.degrade:
+            if num_frames > 1 and hasattr(self.degrade, 'additional_targets') and len(self.degrade.additional_targets) >= num_frames - 1:
+                deg_targets = {f'image{i}': raw_images[i] for i in range(1, num_frames)}
+                deg_res = self.degrade(image=raw_images[0], **deg_targets)
+                raw_images = [deg_res['image']] + [deg_res[f'image{i}'] for i in range(1, num_frames)]
+            else:
+                raw_images = [self.degrade(image=img)['image'] for img in raw_images]
+
+        # 2. Apply transform (synchronously across frames to strictly preserve temporal coherence)
+        if num_frames > 1 and hasattr(self.transform, 'additional_targets') and len(self.transform.additional_targets) >= num_frames - 1:
+            targets = {f'image{i}': raw_images[i] for i in range(1, num_frames)}
+            res = self.transform(image=raw_images[0], **targets)
+            images_list = [res['image']] + [res[f'image{i}'] for i in range(1, num_frames)]
+        else:
+            images_list = [self.transform(image=img)['image'] for img in raw_images]
 
         images_tensor = torch.stack(images_list, dim=0)
         

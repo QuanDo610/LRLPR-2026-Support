@@ -46,6 +46,7 @@ class Config:
     TRANSFORMER_LAYERS: int = 3
     TRANSFORMER_FF_DIM: int = 2048
     TRANSFORMER_DROPOUT: float = 0.1
+    BACKBONE_PRETRAINED: bool = True  # Use ImageNet pretrained weights for ResNet34 backbone
     
     DEVICE: torch.device = field(
         default_factory=lambda: torch.device(

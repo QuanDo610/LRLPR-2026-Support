@@ -88,6 +88,11 @@ def parse_args() -> argparse.Namespace:
         help="Disable Spatial Transformer Network (STN) alignment",
     )
     parser.add_argument(
+        "--no-pretrained",
+        action="store_true",
+        help="Disable ImageNet pretrained weights for ResNet-34 backbone",
+    )
+    parser.add_argument(
         "--submission-mode",
         action="store_true",
         help="Train on full dataset and generate submission file for test data",
@@ -133,6 +138,9 @@ def main():
     
     if args.no_stn:
         config.USE_STN = False
+    
+    if args.no_pretrained:
+        config.BACKBONE_PRETRAINED = False
     
     # Output directory
     config.OUTPUT_DIR = args.output_dir
@@ -263,6 +271,7 @@ def main():
             transformer_ff_dim=config.TRANSFORMER_FF_DIM,
             dropout=config.TRANSFORMER_DROPOUT,
             use_stn=config.USE_STN,
+            pretrained=getattr(config, 'BACKBONE_PRETRAINED', True),
         ).to(config.DEVICE)
     else:
         model = MultiFrameCRNN(

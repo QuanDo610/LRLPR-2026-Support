@@ -3,8 +3,23 @@ import albumentations as A
 from albumentations.pytorch import ToTensorV2
 
 
-def get_train_transforms(img_height: int = 32, img_width: int = 128) -> A.Compose:
-    """Training augmentation pipeline with geometric and color transforms."""
+def _get_additional_targets(num_additional_frames: int):
+    """Generate additional_targets dictionary for multi-frame support."""
+    if num_additional_frames > 0:
+        return {f'image{i}': 'image' for i in range(1, num_additional_frames + 1)}
+    return None
+
+
+def get_train_transforms(
+    img_height: int = 32,
+    img_width: int = 128,
+    num_additional_frames: int = 4
+) -> A.Compose:
+    """Training augmentation pipeline with geometric and color transforms.
+    
+    Uses additional_targets to apply identical geometric transformations across
+    all frames of a track, strictly maintaining temporal coherence.
+    """
     return A.Compose([
         A.Resize(height=img_height, width=img_width),
         A.Affine(
@@ -32,20 +47,24 @@ def get_train_transforms(img_height: int = 32, img_width: int = 128) -> A.Compos
         ),
         A.Normalize(mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5)),
         ToTensorV2()
-    ])
+    ], additional_targets=_get_additional_targets(num_additional_frames), is_check_shapes=False)
 
 
-def get_light_transforms(img_height: int = 32, img_width: int = 128) -> A.Compose:
+def get_light_transforms(
+    img_height: int = 32,
+    img_width: int = 128,
+    num_additional_frames: int = 4
+) -> A.Compose:
     """Light training pipeline: resize + normalize only."""
     return A.Compose([
         A.Resize(height=img_height, width=img_width),
         A.Normalize(mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5)),
         ToTensorV2(),
-    ])
+    ], additional_targets=_get_additional_targets(num_additional_frames), is_check_shapes=False)
 
 
-def get_degradation_transforms() -> A.Compose:
-    """Pipeline to convert HR images to synthetic LR."""
+def get_degradation_transforms(num_additional_frames: int = 4) -> A.Compose:
+    """Pipeline to convert HR images to synthetic LR with coherent multi-frame degradation."""
     return A.Compose([
         A.OneOf([
             A.GaussianBlur(blur_limit=(3, 5), p=1.0),
@@ -57,13 +76,17 @@ def get_degradation_transforms() -> A.Compose:
         ], p=0.7),
         A.ImageCompression(quality_range=(20, 50), p=0.5),
         A.Downscale(scale_range=(0.3, 0.5), p=0.5),
-    ])
+    ], additional_targets=_get_additional_targets(num_additional_frames), is_check_shapes=False)
 
 
-def get_val_transforms(img_height: int = 32, img_width: int = 128) -> A.Compose:
+def get_val_transforms(
+    img_height: int = 32,
+    img_width: int = 128,
+    num_additional_frames: int = 4
+) -> A.Compose:
     """Validation transform pipeline (resize + normalize only)."""
     return A.Compose([
         A.Resize(height=img_height, width=img_width),
         A.Normalize(mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5)),
         ToTensorV2()
-    ])
+    ], additional_targets=_get_additional_targets(num_additional_frames), is_check_shapes=False)

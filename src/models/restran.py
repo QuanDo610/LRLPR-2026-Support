@@ -16,18 +16,20 @@ class ResTranOCR(nn.Module):
         transformer_layers: int = 3,
         transformer_ff_dim: int = 2048,
         dropout: float = 0.1,
-        use_stn: bool = True
+        use_stn: bool = True,
+        pretrained: bool = True,
     ):
         super().__init__()
         self.cnn_channels = 512
         self.use_stn = use_stn
+        self.pretrained = pretrained
         
         # 1. Spatial Transformer Network
         if self.use_stn:
             self.stn = STNBlock(in_channels=3)
 
         # 2. Backbone: ResNet34
-        self.backbone = ResNetFeatureExtractor(pretrained=False)
+        self.backbone = ResNetFeatureExtractor(pretrained=pretrained)
         
         # 3. Attention Fusion
         self.fusion = AttentionFusion(channels=self.cnn_channels)
@@ -66,7 +68,7 @@ class ResTranOCR(nn.Module):
             x_aligned = x_flat
         
         features = self.backbone(x_aligned)  # [B*F, 512, 1, W']
-        fused = self.fusion(features)       # [B, 512, 1, W']
+        fused = self.fusion(features, num_frames=f)       # [B, 512, 1, W']
         
         # Prepare for Transformer: [B, C, 1, W'] -> [B, W', C]
         seq_input = fused.squeeze(2).permute(0, 2, 1)
