@@ -210,7 +210,8 @@ __marimo__/
 # ML / Deep Learning & Dataset specific ignore rules
 # ==============================================================================
 /dataset/
-/data/
+/data
+*.pdf
 /results/
 /kaggle_results/
 /kaggle_kernel/
@@ -220,3 +221,6 @@ __marimo__/
 *.onnx
 *.log
 .DS_Store
+
+# Personal notes and workspace
+QQ/

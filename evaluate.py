@@ -40,8 +40,8 @@ def parse_args():
     parser.add_argument(
         "--model",
         type=str,
-        default="crnn",
-        choices=["crnn", "restran"],
+        default="end2end",
+        choices=["crnn", "restran", "end2end"],
         help="Model architecture to evaluate",
     )
     parser.add_argument(
@@ -80,12 +80,14 @@ def main():
     print(f"🚀 Starting Comprehensive Model Evaluation on device: {device}")
     
     # 1. Load validation dataset
+    in_h = 16 if args.model == "end2end" else config.IMG_HEIGHT
+    in_w = 64 if args.model == "end2end" else config.IMG_WIDTH
     val_ds = MultiFrameDataset(
         root_dir=args.data_dir,
         mode='val',
         split_ratio=config.SPLIT_RATIO,
-        img_height=config.IMG_HEIGHT,
-        img_width=config.IMG_WIDTH,
+        img_height=in_h,
+        img_width=in_w,
         char2idx=config.CHAR2IDX,
         val_split_file=config.VAL_SPLIT_FILE,
     )
@@ -105,7 +107,16 @@ def main():
     print(f"📊 Loaded {len(val_ds)} validation tracks ({len(val_loader)} batches)")
 
     # 2. Instantiate model
-    if args.model == "restran":
+    if args.model == "end2end":
+        from src.models.end2end_lpr import End2EndLPR
+        model = End2EndLPR(
+            num_classes=config.NUM_CLASSES,
+            sr_num_blocks=8,
+            ocr_transformer_layers=2,
+            use_stn=config.USE_STN,
+            pretrained=False,
+        )
+    elif args.model == "restran":
         model = ResTranOCR(
             num_classes=config.NUM_CLASSES,
             transformer_heads=config.TRANSFORMER_HEADS,
@@ -113,6 +124,7 @@ def main():
             transformer_ff_dim=config.TRANSFORMER_FF_DIM,
             dropout=config.TRANSFORMER_DROPOUT,
             use_stn=config.USE_STN,
+            pretrained=False,
         )
     else:
         model = MultiFrameCRNN(
