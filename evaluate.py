@@ -41,7 +41,7 @@ def parse_args():
         "--model",
         type=str,
         default="end2end",
-        choices=["crnn", "restran", "end2end"],
+        choices=["crnn", "restran", "end2end", "sr_vit"],
         help="Model architecture to evaluate",
     )
     parser.add_argument(
@@ -80,8 +80,8 @@ def main():
     print(f"🚀 Starting Comprehensive Model Evaluation on device: {device}")
     
     # 1. Load validation dataset
-    in_h = 16 if args.model == "end2end" else config.IMG_HEIGHT
-    in_w = 64 if args.model == "end2end" else config.IMG_WIDTH
+    in_h = 16 if args.model in ["end2end", "sr_vit"] else config.IMG_HEIGHT
+    in_w = 64 if args.model in ["end2end", "sr_vit"] else config.IMG_WIDTH
     val_ds = MultiFrameDataset(
         root_dir=args.data_dir,
         mode='val',
@@ -107,7 +107,19 @@ def main():
     print(f"📊 Loaded {len(val_ds)} validation tracks ({len(val_loader)} batches)")
 
     # 2. Instantiate model
-    if args.model == "end2end":
+    if args.model == "sr_vit":
+        from src.models.sr_vit import MultiFrameSRViT
+        model = MultiFrameSRViT(
+            num_classes=config.NUM_CLASSES,
+            sr_num_blocks=8,
+            patch_h=config.SR_VIT_PATCH_H,
+            patch_w=config.SR_VIT_PATCH_W,
+            embed_dim=config.SR_VIT_EMBED_DIM,
+            num_heads=config.SR_VIT_NUM_HEADS,
+            num_layers=config.SR_VIT_NUM_LAYERS,
+            ff_dim=config.SR_VIT_FF_DIM,
+        )
+    elif args.model == "end2end":
         from src.models.end2end_lpr import End2EndLPR
         model = End2EndLPR(
             num_classes=config.NUM_CLASSES,

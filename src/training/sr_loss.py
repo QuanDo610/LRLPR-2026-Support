@@ -23,13 +23,17 @@ class PerceptualLoss(nn.Module):
         self.register_buffer("std", torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1))
 
     def forward(self, sr, hr):
+        # Denormalize from [-1, 1] to [0, 1]
+        sr_01 = torch.clamp((sr + 1.0) / 2.0, 0.0, 1.0)
+        hr_01 = torch.clamp((hr + 1.0) / 2.0, 0.0, 1.0)
+        
         # Normalize assuming inputs are in [0, 1]
-        sr = (sr - self.mean) / self.std
-        hr = (hr - self.mean) / self.std
+        sr_norm = (sr_01 - self.mean) / self.std
+        hr_norm = (hr_01 - self.mean) / self.std
         
         loss = 0.0
-        x_sr = sr
-        x_hr = hr
+        x_sr = sr_norm
+        x_hr = hr_norm
         for block in self.blocks:
             x_sr = block(x_sr)
             x_hr = block(x_hr)

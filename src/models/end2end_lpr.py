@@ -6,7 +6,7 @@ from src.models.restran import ResTranOCR
 class End2EndLPR(nn.Module):
     """
     End-to-End Low-Resolution License Plate Recognition Model.
-    Pipeline: 5 LR Frames -> StackedSRNet -> Enhanced Plate -> STN + ResNet34 -> Attention Fusion -> Transformer -> CTC Head
+    Pipeline: 5 LR Frames -> Frame-Parallel SRNet -> 5 Enhanced Frames -> STN + ResNet34 -> Attention Fusion -> Transformer -> CTC Head
     """
     def __init__(
         self,
@@ -57,14 +57,11 @@ class End2EndLPR(nn.Module):
             If return_sr is True: (logits, sr_image)
             If return_sr is False: logits
         """
-        # 1. Super Resolution: [B, F, C, H, W] -> [B, 3, H*scale, W*scale]
+        # 1. Super Resolution: [B, F, C, H, W] -> [B, F, 3, H*scale, W*scale]
         sr_image = self.sr_net(x)
         
-        # 2. Add frame dimension for OCR module: [B, 1, 3, H*scale, W*scale]
-        ocr_input = sr_image.unsqueeze(1)
-        
-        # 3. OCR Pipeline
-        logits = self.ocr_net(ocr_input)
+        # 2. OCR Pipeline (Receives full 5 frames -> AttentionFusion activated!)
+        logits = self.ocr_net(sr_image)
         
         if return_sr:
             return logits, sr_image

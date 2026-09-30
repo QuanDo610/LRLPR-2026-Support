@@ -38,9 +38,9 @@ class RCAB(nn.Module):
 
 class StackedSRNet(nn.Module):
     """
-    Super-Resolution Network that stacks multiple LR frames to produce a single HR frame.
-    Input: [Batch, Frames, 3, H, W] -> Stacked -> [Batch, 15, H, W]
-    Output: [Batch, 3, H*scale, W*scale]
+    Frame-Parallel Super-Resolution Network.
+    Input: [Batch, Frames, 3, H, W] -> Output: [Batch, Frames, 3, H*scale, W*scale]
+    Or Input: [Batch*Frames, 3, H, W] -> Output: [Batch*Frames, 3, H*scale, W*scale]
     """
     def __init__(
         self,
@@ -52,14 +52,12 @@ class StackedSRNet(nn.Module):
     ):
         super(StackedSRNet, self).__init__()
         self.num_frames = num_frames
-        self.in_channels = in_channels * num_frames
         self.scale_factor = scale_factor
-        self.base_channels = base_channels
         
-        # Initial feature extraction from stacked frames
-        self.conv_first = nn.Conv2d(self.in_channels, base_channels, 3, padding=1, bias=True)
+        # Initial feature extraction (no more 15-channel stacking)
+        self.head = nn.Conv2d(in_channels, base_channels, 3, padding=1, bias=True)
         
-        # Residual body with RCAB blocks (EDSR style without BN + CALayer)
+        # Residual body with RCAB blocks
         self.body = nn.Sequential(*[
             RCAB(base_channels, base_channels, reduction=16) for _ in range(num_blocks)
         ])
@@ -73,31 +71,36 @@ class StackedSRNet(nn.Module):
             nn.ReLU(inplace=True)
         )
         
-        # Final reconstruction layer to get 3 channels output (RGB)
-        self.conv_last = nn.Conv2d(base_channels, 3, 3, padding=1, bias=True)
+        # Final reconstruction layer
+        self.tail = nn.Conv2d(base_channels, 3, 3, padding=1, bias=True)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Args:
-            x: Input tensor of shape [B, N, C, H, W] where N = num_frames.
+            x: Input tensor of shape [B, N, C, H, W] or [B*N, C, H, W].
         Returns:
-            HR image tensor of shape [B, 3, H*scale, W*scale].
+            HR image tensor of shape [B, N, C, H*scale, W*scale] or [B*N, C, H*scale, W*scale].
         """
-        B, N, C, H, W = x.size()
+        is_5d = x.dim() == 5
+        if is_5d:
+            B, N, C, H, W = x.size()
+            x = x.view(B * N, C, H, W)
+            
+        # Global residual connection via bicubic interpolation
+        base = F.interpolate(x, scale_factor=self.scale_factor, mode='bicubic', align_corners=False)
         
-        # Stack frames along the channel dimension
-        x = x.view(B, N * C, H, W)
-        
-        # Feature extraction
-        x_first = self.conv_first(x)
-        
-        # Residual Body
-        res = self.body(x_first)
+        feat = self.head(x)
+        res = self.body(feat)
         res = self.conv_body(res)
-        res += x_first
+        res += feat
         
-        # Upsampling
-        x_up = self.upsample(res)
-        out = self.conv_last(x_up)
+        out = self.tail(self.upsample(res))
         
+        # Add base and clamp to [-1, 1] matching ALBUMENTATIONS
+        out = torch.clamp(out + base, -1.0, 1.0)
+        
+        if is_5d:
+            _, C_out, H_out, W_out = out.size()
+            out = out.view(B, N, C_out, H_out, W_out)
+            
         return out

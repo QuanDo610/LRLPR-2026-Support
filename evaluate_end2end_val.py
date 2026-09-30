@@ -7,7 +7,7 @@ from configs.config import get_default_config
 from train_joint import JointDataset
 from src.models.end2end_lpr import End2EndLPR
 from src.training.trainer import decode_with_confidence
-from QQ.scripts.eval_confusion import get_alignment
+from scripts.eval_confusion import get_alignment
 
 def main():
     config = get_default_config()

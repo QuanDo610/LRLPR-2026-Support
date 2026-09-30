@@ -48,6 +48,14 @@ class Config:
     TRANSFORMER_DROPOUT: float = 0.1
     BACKBONE_PRETRAINED: bool = True  # Use ImageNet pretrained weights for ResNet34 backbone
     
+    # MultiFrameSRViT hyperparameters
+    SR_VIT_PATCH_H: int = 4
+    SR_VIT_PATCH_W: int = 8
+    SR_VIT_EMBED_DIM: int = 256
+    SR_VIT_NUM_HEADS: int = 8
+    SR_VIT_NUM_LAYERS: int = 6
+    SR_VIT_FF_DIM: int = 1024
+    
     DEVICE: torch.device = field(
         default_factory=lambda: torch.device(
             'cuda' if torch.cuda.is_available() else ('mps' if torch.backends.mps.is_available() else 'cpu')

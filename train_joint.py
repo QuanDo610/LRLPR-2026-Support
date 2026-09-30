@@ -16,6 +16,7 @@ import torch.amp
 
 from configs.config import get_default_config, Config
 from src.models.end2end_lpr import End2EndLPR
+from src.models.sr_vit import MultiFrameSRViT
 from src.training.sr_loss import SRLoss
 from src.training.trainer import decode_with_confidence
 from src.data.transforms import get_degradation_transforms
@@ -192,8 +193,14 @@ def main():
     
     if not os.path.exists(config.VAL_SPLIT_FILE):
         os.makedirs(os.path.dirname(config.VAL_SPLIT_FILE), exist_ok=True)
-        with open(config.VAL_SPLIT_FILE, 'w') as f:
-            json.dump([], f)
+        from src.data.dataset import MultiFrameDataset
+        _ = MultiFrameDataset(
+            root_dir=config.DATA_ROOT,
+            mode='train',
+            val_split_file=config.VAL_SPLIT_FILE,
+            split_ratio=config.SPLIT_RATIO,
+            seed=config.SEED
+        )
             
     train_dataset = JointDataset(config.DATA_ROOT, config.VAL_SPLIT_FILE, config.CHAR2IDX, mode='train',
                                  lr_h=16, lr_w=64, scale=2)
@@ -204,29 +211,50 @@ def main():
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, collate_fn=JointDataset.collate_fn, num_workers=4)
     val_loader = DataLoader(val_dataset, batch_size=32, shuffle=False, collate_fn=JointDataset.collate_fn, num_workers=2)
     
-    model = End2EndLPR(
-        num_classes=config.NUM_CLASSES,
-        sr_num_blocks=8,
-        ocr_transformer_layers=2,
-        pretrained=True
-    ).to(device)
+    if config.MODEL_TYPE == "sr_vit":
+        print("🚀 Using MultiFrameSRViT (Flow 3) architecture for Joint Training")
+        model = MultiFrameSRViT(
+            num_classes=config.NUM_CLASSES,
+            sr_num_blocks=8,
+            patch_h=config.SR_VIT_PATCH_H,
+            patch_w=config.SR_VIT_PATCH_W,
+            embed_dim=config.SR_VIT_EMBED_DIM,
+            num_heads=config.SR_VIT_NUM_HEADS,
+            num_layers=config.SR_VIT_NUM_LAYERS,
+            ff_dim=config.SR_VIT_FF_DIM,
+        ).to(device)
+    else:
+        print("🚀 Using End2EndLPR (Flow 2) architecture for Joint Training")
+        model = End2EndLPR(
+            num_classes=config.NUM_CLASSES,
+            sr_num_blocks=8,
+            ocr_transformer_layers=2,
+            pretrained=True
+        ).to(device)
     
-    # Warm-start SR module if available
+    # Warm-start Full Decoupled Model if available to save time!
+    decoupled_path = os.path.join(config.OUTPUT_DIR, f"decoupled_{config.MODEL_TYPE}_best.pth")
     sr_weights_path = os.path.join(config.OUTPUT_DIR, "sr_net_best.pth")
-    if os.path.exists(sr_weights_path):
-        print(f"📦 Warm-starting SR module from {sr_weights_path}")
-        model.sr_net.load_state_dict(torch.load(sr_weights_path, map_location=device))
+    
+    if os.path.exists(decoupled_path):
+        print(f"📦 Warm-starting FULL MODEL from decoupled weights: {decoupled_path}")
+        checkpoint = torch.load(decoupled_path, map_location=device)
+        state_dict = checkpoint["state_dict"] if "state_dict" in checkpoint else checkpoint
+        model.load_state_dict(state_dict, strict=False)
+    elif os.path.exists(sr_weights_path):
+        print(f"📦 Warm-starting ONLY SR module from {sr_weights_path}")
+        model.sr_net.load_state_dict(torch.load(sr_weights_path, map_location=device), strict=False)
     
     # Separate Learning Rates with AdamW
     sr_params = [p for n, p in model.named_parameters() if 'sr_net' in n]
-    ocr_params = [p for n, p in model.named_parameters() if 'ocr_net' in n]
+    ocr_params = [p for n, p in model.named_parameters() if 'sr_net' not in n]
     
     optimizer = optim.AdamW([
         {'params': sr_params, 'lr': LR_SR, 'weight_decay': 1e-4},
-        {'params': ocr_params, 'lr': LR_OCR, 'weight_decay': 1e-4}
+        {'params': ocr_params, 'lr': LR_OCR, 'weight_decay': 0.05}
     ])
     
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS, eta_min=1e-6)
+    scheduler = optim.lr_scheduler.OneCycleLR(optimizer, max_lr=[LR_SR, LR_OCR], epochs=EPOCHS, steps_per_epoch=len(train_loader), pct_start=0.1, div_factor=25, final_div_factor=1000)
     
     ctc_loss_fn = torch.nn.CTCLoss(blank=0, zero_infinity=True).to(device)
     sr_loss_fn = SRLoss(w_mse=1.0, w_perceptual=0.1, w_edge=0.1, device=device)
@@ -256,13 +284,15 @@ def main():
                 if device.type == 'mps':
                     loss_ctc = ctc_loss_fn(preds_permuted.cpu(), targets.cpu(), input_lengths, target_lengths).to(device)
                 else:
-                    loss_ctc = ctc_loss_fn(preds_permuted, targets, input_lengths, target_lengths)
+                    loss_ctc = ctc_loss_fn(preds_permuted.float(), targets, input_lengths, target_lengths)
                 
                 # SR Loss (only for synthetic data where we have HR)
                 if is_synth.any():
                     sr_image_synth = sr_image[is_synth]
                     hr_synth = hr[is_synth]
-                    loss_sr = sr_loss_fn(sr_image_synth, hr_synth)
+                    # Select center frame from [B, F, C, H, W] for SR loss
+                    center_idx = sr_image_synth.size(1) // 2
+                    loss_sr = sr_loss_fn(sr_image_synth[:, center_idx, :, :, :], hr_synth)
                 else:
                     loss_sr = torch.tensor(0.0, device=device)
                     
@@ -298,14 +328,13 @@ def main():
                     
         val_acc = (total_correct / total_val_samples) * 100 if total_val_samples > 0 else 0.0
         current_lr = scheduler.get_last_lr()[1]
-        scheduler.step()
         
         print(f"📊 Epoch {epoch+1}/{EPOCHS} -> Train Loss: {avg_loss:.4f} | Val Acc: {val_acc:.2f}% | Best Acc: {max(best_val_acc, val_acc):.2f}% | LR: {current_lr:.2e}")
         
         if val_acc > best_val_acc:
             best_val_acc = val_acc
             os.makedirs(config.OUTPUT_DIR, exist_ok=True)
-            save_path = os.path.join(config.OUTPUT_DIR, "end2end_joint_best.pth")
+            save_path = os.path.join(config.OUTPUT_DIR, f"joint_{config.MODEL_TYPE}_best.pth")
             torch.save(model.state_dict(), save_path)
             print(f"  ⭐ Saved New Best Joint Model: {save_path} ({best_val_acc:.2f}%)")
         

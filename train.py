@@ -29,8 +29,8 @@ def parse_args() -> argparse.Namespace:
         help="Experiment name for checkpoint/submission files (default: from config)"
     )
     parser.add_argument(
-        "-m", "--model", type=str, choices=["crnn", "restran"], default=None,
-        help="Model architecture: 'crnn' or 'restran' (default: from config)"
+        "-m", "--model", type=str, choices=["crnn", "restran", "sr_vit"], default=None,
+        help="Model architecture: 'crnn', 'restran' or 'sr_vit' (default: from config)"
     )
     parser.add_argument(
         "--epochs", type=int, default=None,
@@ -263,7 +263,21 @@ def main():
     )
 
     # Initialize model based on config
-    if config.MODEL_TYPE == "restran":
+    if config.MODEL_TYPE == "sr_vit":
+        from src.models.sr_vit import MultiFrameSRViT
+        model = MultiFrameSRViT(
+            num_classes=config.NUM_CLASSES,
+            sr_num_blocks=8,
+            patch_h=config.SR_VIT_PATCH_H,
+            patch_w=config.SR_VIT_PATCH_W,
+            embed_dim=config.SR_VIT_EMBED_DIM,
+            num_heads=config.SR_VIT_NUM_HEADS,
+            num_layers=config.SR_VIT_NUM_LAYERS,
+            ff_dim=config.SR_VIT_FF_DIM,
+            dropout=config.TRANSFORMER_DROPOUT,
+            max_seq_len=(config.IMG_HEIGHT // config.SR_VIT_PATCH_H) * (config.IMG_WIDTH // config.SR_VIT_PATCH_W)
+        ).to(config.DEVICE)
+    elif config.MODEL_TYPE == "restran":
         model = ResTranOCR(
             num_classes=config.NUM_CLASSES,
             transformer_heads=config.TRANSFORMER_HEADS,
