@@ -18,13 +18,15 @@ rsync -a --exclude='.venv' --exclude='.git' --exclude='__pycache__' --exclude='k
 # Copy data (Explicitly resolve symlinks)
 echo "📦 Đang copy val_tracks.json..."
 mkdir -p "$TMP_DIR/source/data"
-cp dataset/data/val_tracks.json "$TMP_DIR/source/data/"
+cp data/val_tracks.json "$TMP_DIR/source/data/" 2>/dev/null || cp dataset/data/val_tracks.json "$TMP_DIR/source/data/" 2>/dev/null || true
 
 # Copy weights đã warm-start nếu có
 if [ -d "results" ]; then
     mkdir -p "$TMP_DIR/source/results"
     cp results/sr_net_best.pth "$TMP_DIR/source/results/" 2>/dev/null || true
     cp results/decoupled_sr_vit_best.pth "$TMP_DIR/source/results/" 2>/dev/null || true
+    cp results/restran_kaggle_gpu_best.pth "$TMP_DIR/source/results/" 2>/dev/null || true
+    cp results/flow2_warmstart_init.pth "$TMP_DIR/source/results/" 2>/dev/null || true
 fi
 
 # Zip toàn bộ thư mục source thành codebase.zip (Để Kaggle auto-unzip giữ nguyên cấu trúc)

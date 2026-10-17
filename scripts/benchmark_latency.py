@@ -33,8 +33,10 @@ def benchmark_model(model, name, device, input_shape=(1, 5, 3, 16, 48), iteratio
         for _ in range(iterations):
             start = time.perf_counter()
             _ = model(dummy_input)
-            if device.type in ['cuda', 'mps']:
-                torch.cuda.synchronize() if device.type == 'cuda' else None
+            if device.type == 'cuda':
+                torch.cuda.synchronize()
+            elif device.type == 'mps':
+                torch.mps.synchronize()
             end = time.perf_counter()
             latencies.append((end - start) * 1000) # ms
             
@@ -55,12 +57,13 @@ def main():
     config = get_default_config()
     device = config.DEVICE
     
-    # Flow 2 Model
-    flow2 = End2EndLPR(
+    from src.models.sr_restran import MultiFrameSRResTran
+    # Flow 2 Proposed Model
+    flow2 = MultiFrameSRResTran(
         num_classes=config.NUM_CLASSES,
         sr_num_blocks=8,
-        ocr_transformer_layers=2,
-        pretrained=False # Don't need weights for benchmark
+        transformer_layers=config.TRANSFORMER_LAYERS,
+        pretrained=False
     ).to(device)
     
     # Flow 3 Model

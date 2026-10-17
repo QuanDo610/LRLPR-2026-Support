@@ -1,6 +1,6 @@
 """Configuration dataclass for the training pipeline."""
 from dataclasses import dataclass, field
-from typing import Dict
+from typing import Dict, Optional
 import torch
 
 
@@ -31,7 +31,7 @@ class Config:
     LEARNING_RATE: float = 5e-4
     EPOCHS: int = 30
     SEED: int = 42
-    NUM_WORKERS: int = 10
+    NUM_WORKERS: int = 4
     WEIGHT_DECAY: float = 1e-4
     GRAD_CLIP: float = 5.0
     SPLIT_RATIO: float = 0.9
@@ -55,6 +55,11 @@ class Config:
     SR_VIT_NUM_HEADS: int = 8
     SR_VIT_NUM_LAYERS: int = 6
     SR_VIT_FF_DIM: int = 1024
+    
+    # Training execution flags
+    FREEZE_SR: bool = False
+    DRY_RUN: bool = False
+    MAX_HOURS: Optional[float] = None
     
     DEVICE: torch.device = field(
         default_factory=lambda: torch.device(

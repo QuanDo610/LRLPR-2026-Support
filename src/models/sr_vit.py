@@ -51,7 +51,8 @@ class MultiFrameCrossAttentionFusion(nn.Module):
 
 class MultiFrameSRViT(nn.Module):
     """
-    Flow 3: Pure Vision Transformer with Multi-Frame SR and Spatio-Temporal Cross-Attention.
+    Flow 3: Pure Vision Transformer with Multi-Frame SR, Spatio-Temporal Cross-Attention,
+    and Spatial-to-Sequence Height Pooling for 1D CTC alignment.
     """
     def __init__(
         self,
@@ -67,6 +68,9 @@ class MultiFrameSRViT(nn.Module):
         max_seq_len: int = 128 # Default max sequence length (e.g., handles up to 128 patches)
     ):
         super().__init__()
+        self.patch_h = patch_h
+        self.patch_w = patch_w
+        self.embed_dim = embed_dim
         
         # 1. Frame-Parallel SR
         self.sr_net = StackedSRNet(num_blocks=sr_num_blocks, scale_factor=2)
@@ -85,9 +89,12 @@ class MultiFrameSRViT(nn.Module):
             d_model=embed_dim, nhead=num_heads, dim_feedforward=ff_dim, dropout=dropout, batch_first=True
         )
         self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        self.norm = nn.LayerNorm(embed_dim)
         
         # 6. CTC Head
-        self.ctc_head = nn.Linear(embed_dim, num_classes)
+        self.head = nn.Linear(embed_dim, num_classes)
+        # Backward compatibility alias
+        self.ctc_head = self.head
         
     def forward(self, x, return_sr=False):
         # x: [B, F, 3, H, W]
@@ -100,6 +107,10 @@ class MultiFrameSRViT(nn.Module):
         _, _, C_sr, H_sr, W_sr = sr_image.size()
         sr_flat = sr_image.reshape(B * F, C_sr, H_sr, W_sr)
         
+        # Calculate dynamic grid dimensions
+        grid_h = H_sr // self.patch_h
+        grid_w = W_sr // self.patch_w
+        
         # 2. Patch Embedding: [B*F, N, embed_dim]
         patches = self.patch_embed(sr_flat)
         N = patches.size(1)
@@ -111,11 +122,19 @@ class MultiFrameSRViT(nn.Module):
         fused_features = self.fusion(patches, num_frames=F)
         
         # 5. Transformer Encoder
-        encoded = self.encoder(fused_features)
+        vit_out = self.encoder(fused_features)
+        vit_out = self.norm(vit_out)
         
-        # 6. CTC Head -> [B, N, num_classes]
-        logits = self.ctc_head(encoded)
+        # 6. Spatial-to-Sequence Height Pooling (Gộp chiều cao đưa về chuỗi 1D từ trái sang phải)
+        # Reshape từ [B, Grid_H * Grid_W, D] về lưới 2D không gian: [B, Grid_H, Grid_W, D]
+        grid_tokens = vit_out.view(B, grid_h, grid_w, self.embed_dim)
+        # Average Pool dọc theo Grid_H -> [B, Grid_W, embed_dim]
+        seq_tokens = torch.mean(grid_tokens, dim=1)
+        
+        # 7. CTC Head nhận chuỗi grid_w bước thời gian
+        out = self.head(seq_tokens)
+        log_probs = out.log_softmax(2)
         
         if return_sr:
-            return logits, sr_image
-        return logits
+            return log_probs, sr_image
+        return log_probs

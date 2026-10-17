@@ -38,10 +38,10 @@ def levenshtein_distance(s1: str, s2: str) -> int:
 def parse_args():
     parser = argparse.ArgumentParser(description="Evaluate LPR Model Performance Metrics")
     parser.add_argument(
-        "--model",
+        "-m", "--model",
         type=str,
         default="end2end",
-        choices=["crnn", "restran", "end2end", "sr_vit"],
+        choices=["crnn", "restran", "end2end", "sr_restran", "sr_vit"],
         help="Model architecture to evaluate",
     )
     parser.add_argument(
@@ -80,8 +80,8 @@ def main():
     print(f"🚀 Starting Comprehensive Model Evaluation on device: {device}")
     
     # 1. Load validation dataset
-    in_h = 16 if args.model in ["end2end", "sr_vit"] else config.IMG_HEIGHT
-    in_w = 64 if args.model in ["end2end", "sr_vit"] else config.IMG_WIDTH
+    in_h = 16 if args.model in ["end2end", "sr_restran", "sr_vit"] else config.IMG_HEIGHT
+    in_w = 64 if args.model in ["end2end", "sr_restran", "sr_vit"] else config.IMG_WIDTH
     val_ds = MultiFrameDataset(
         root_dir=args.data_dir,
         mode='val',
@@ -119,12 +119,13 @@ def main():
             num_layers=config.SR_VIT_NUM_LAYERS,
             ff_dim=config.SR_VIT_FF_DIM,
         )
-    elif args.model == "end2end":
-        from src.models.end2end_lpr import End2EndLPR
-        model = End2EndLPR(
+    elif args.model in ["end2end", "sr_restran"]:
+        from src.models.sr_restran import MultiFrameSRResTran
+        model = MultiFrameSRResTran(
             num_classes=config.NUM_CLASSES,
             sr_num_blocks=8,
-            ocr_transformer_layers=2,
+            sr_scale_factor=2,
+            transformer_layers=2 if args.model == "end2end" else config.TRANSFORMER_LAYERS,
             use_stn=config.USE_STN,
             pretrained=False,
         )

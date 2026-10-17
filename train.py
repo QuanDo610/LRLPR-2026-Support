@@ -29,8 +29,8 @@ def parse_args() -> argparse.Namespace:
         help="Experiment name for checkpoint/submission files (default: from config)"
     )
     parser.add_argument(
-        "-m", "--model", type=str, choices=["crnn", "restran", "sr_vit"], default=None,
-        help="Model architecture: 'crnn', 'restran' or 'sr_vit' (default: from config)"
+        "-m", "--model", type=str, choices=["crnn", "restran", "sr_restran", "sr_vit"], default=None,
+        help="Model architecture: 'crnn', 'restran', 'sr_restran' or 'sr_vit' (default: from config)"
     )
     parser.add_argument(
         "--epochs", type=int, default=None,
@@ -83,6 +83,12 @@ def parse_args() -> argparse.Namespace:
         help="Directory to save checkpoints and submission files (default: results/)",
     )
     parser.add_argument(
+        "--grad-clip",
+        type=float,
+        default=None,
+        help="Max gradient norm for clipping (default: from config)",
+    )
+    parser.add_argument(
         "--no-stn",
         action="store_true",
         help="Disable Spatial Transformer Network (STN) alignment",
@@ -93,6 +99,12 @@ def parse_args() -> argparse.Namespace:
         help="Disable ImageNet pretrained weights for ResNet-34 backbone",
     )
     parser.add_argument(
+        "--pretrained-backbone",
+        action="store_true",
+        default=True,
+        help="Enable ImageNet pretrained weights for ResNet-34 backbone (default: True)",
+    )
+    parser.add_argument(
         "--submission-mode",
         action="store_true",
         help="Train on full dataset and generate submission file for test data",
@@ -101,6 +113,40 @@ def parse_args() -> argparse.Namespace:
         "--require-gpu",
         action="store_true",
         help="Abort immediately if no GPU (CUDA/MPS) is detected",
+    )
+    parser.add_argument(
+        "--freeze-sr",
+        action="store_true",
+        help="Freeze Super-Resolution module (requires_grad=False) to prevent gradient distortion (Bug 4 fix)",
+    )
+    parser.add_argument(
+        "--warmstart-ocr",
+        type=str,
+        default=None,
+        help="Path to pretrained OCR checkpoint (.pth) to initialize OCR backbone/heads",
+    )
+    parser.add_argument(
+        "--warmstart-sr",
+        type=str,
+        default=None,
+        help="Path to pretrained Super-Resolution checkpoint (.pth) to initialize SR module",
+    )
+    parser.add_argument(
+        "--checkpoint",
+        type=str,
+        default=None,
+        help="Path to full model checkpoint (.pth) to resume training",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Dry-run mode: run 5 training batches and sample validation to verify pipeline and measure batch speed (Rule 8)",
+    )
+    parser.add_argument(
+        "--max-hours",
+        type=float,
+        default=None,
+        help="Hard execution time limit in hours. Automatically breaks and saves checkpoints if exceeded.",
     )
     return parser.parse_args()
 
@@ -125,12 +171,18 @@ def main():
         'hidden_size': 'HIDDEN_SIZE',
         'transformer_heads': 'TRANSFORMER_HEADS',
         'transformer_layers': 'TRANSFORMER_LAYERS',
+        'grad_clip': 'GRAD_CLIP',
+        'max_hours': 'MAX_HOURS',
     }
     
     for arg_name, config_name in arg_to_config.items():
         value = getattr(args, arg_name, None)
         if value is not None:
             setattr(config, config_name, value)
+    
+    # Default EXPERIMENT_NAME to model if not explicitly specified
+    if args.experiment_name is None and args.model is not None:
+        config.EXPERIMENT_NAME = args.model
     
     # Special cases
     if args.aug_level is not None:
@@ -141,6 +193,14 @@ def main():
     
     if args.no_pretrained:
         config.BACKBONE_PRETRAINED = False
+        
+    if args.freeze_sr:
+        config.FREEZE_SR = True
+        
+    if args.dry_run:
+        config.DRY_RUN = True
+        config.EPOCHS = 1
+        print("\n🧪 DRY-RUN MODE ACTIVATED (Rule 8): Running 5 train batches and sample val batches to estimate runtime.")
     
     # Output directory
     config.OUTPUT_DIR = args.output_dir
@@ -171,10 +231,12 @@ def main():
         sys.exit(1)
 
     # Common dataset parameters
+    in_h = 16 if config.MODEL_TYPE in ["sr_restran", "sr_vit"] else config.IMG_HEIGHT
+    in_w = 64 if config.MODEL_TYPE in ["sr_restran", "sr_vit"] else config.IMG_WIDTH
     common_ds_params = {
         'split_ratio': config.SPLIT_RATIO,
-        'img_height': config.IMG_HEIGHT,
-        'img_width': config.IMG_WIDTH,
+        'img_height': in_h,
+        'img_width': in_w,
         'char2idx': config.CHAR2IDX,
         'val_split_file': config.VAL_SPLIT_FILE,
         'seed': config.SEED,
@@ -201,8 +263,8 @@ def main():
             test_ds = MultiFrameDataset(
                 root_dir=config.TEST_DATA_ROOT,
                 mode='val',
-                img_height=config.IMG_HEIGHT,
-                img_width=config.IMG_WIDTH,
+                img_height=in_h,
+                img_width=in_w,
                 char2idx=config.CHAR2IDX,
                 seed=config.SEED,
                 is_test=True,
@@ -265,6 +327,9 @@ def main():
     # Initialize model based on config
     if config.MODEL_TYPE == "sr_vit":
         from src.models.sr_vit import MultiFrameSRViT
+        # Calculate max_seq_len for SR image (in_h*2 x in_w*2)
+        sr_h = in_h * 2
+        sr_w = in_w * 2
         model = MultiFrameSRViT(
             num_classes=config.NUM_CLASSES,
             sr_num_blocks=8,
@@ -275,7 +340,20 @@ def main():
             num_layers=config.SR_VIT_NUM_LAYERS,
             ff_dim=config.SR_VIT_FF_DIM,
             dropout=config.TRANSFORMER_DROPOUT,
-            max_seq_len=(config.IMG_HEIGHT // config.SR_VIT_PATCH_H) * (config.IMG_WIDTH // config.SR_VIT_PATCH_W)
+            max_seq_len=(sr_h // config.SR_VIT_PATCH_H) * (sr_w // config.SR_VIT_PATCH_W)
+        ).to(config.DEVICE)
+    elif config.MODEL_TYPE == "sr_restran":
+        from src.models.sr_restran import MultiFrameSRResTran
+        model = MultiFrameSRResTran(
+            num_classes=config.NUM_CLASSES,
+            sr_num_blocks=8,
+            sr_scale_factor=2,
+            transformer_heads=config.TRANSFORMER_HEADS,
+            transformer_layers=config.TRANSFORMER_LAYERS,
+            transformer_ff_dim=config.TRANSFORMER_FF_DIM,
+            dropout=config.TRANSFORMER_DROPOUT,
+            use_stn=config.USE_STN,
+            pretrained=getattr(config, 'BACKBONE_PRETRAINED', True),
         ).to(config.DEVICE)
     elif config.MODEL_TYPE == "restran":
         model = ResTranOCR(
@@ -295,6 +373,88 @@ def main():
             use_stn=config.USE_STN,
         ).to(config.DEVICE)
     
+    # 1. Full checkpoint loading
+    if args.checkpoint:
+        if os.path.exists(args.checkpoint):
+            print(f"📦 Loading full model checkpoint from {args.checkpoint}")
+            ckpt = torch.load(args.checkpoint, map_location=config.DEVICE)
+            missing, unexpected = model.load_state_dict(ckpt, strict=False)
+            matched = len(ckpt) - len(unexpected)
+            print(f"   ✅ Checkpoint loaded: {matched} keys matched (missing: {len(missing)}, unexpected: {len(unexpected)})")
+        else:
+            print(f"❌ ERROR: Checkpoint not found at {args.checkpoint}")
+            sys.exit(1)
+
+    # 2. Warmstart SR module
+    if args.warmstart_sr:
+        if os.path.exists(args.warmstart_sr):
+            print(f"📦 Warm-starting SR module from {args.warmstart_sr}")
+            sr_state = torch.load(args.warmstart_sr, map_location=config.DEVICE)
+            # If state has 'sr_net.' prefix, extract only sr_net keys
+            sr_sub_state = {}
+            for k, v in sr_state.items():
+                if k.startswith("sr_net."):
+                    sr_sub_state[k.replace("sr_net.", "")] = v
+                elif not any(k.startswith(p) for p in ["ocr_net.", "backbone.", "stn.", "encoder.", "head."]):
+                    sr_sub_state[k] = v
+            
+            target_sr = getattr(model, 'sr_net', None)
+            if target_sr is not None:
+                # Handle old conv_first / conv_last mapping if applicable
+                adapted_sr_state = {}
+                for k, v in sr_sub_state.items():
+                    new_k = k
+                    if k.startswith("conv_first."):
+                        new_k = k.replace("conv_first.", "head.")
+                    elif k.startswith("conv_last."):
+                        new_k = k.replace("conv_last.", "tail.")
+                    adapted_sr_state[new_k] = v
+                
+                missing, unexpected = target_sr.load_state_dict(adapted_sr_state, strict=False)
+                matched = len(adapted_sr_state) - len(unexpected)
+                print(f"   ✅ SR module weights loaded: {matched} keys matched into sr_net (missing: {len(missing)}, unexpected: {len(unexpected)})")
+            else:
+                print(f"   ⚠️ Model {config.MODEL_TYPE} does not have a 'sr_net' submodule. Skipping SR warmstart.")
+        else:
+            print(f"❌ ERROR: SR checkpoint not found at {args.warmstart_sr}")
+            sys.exit(1)
+
+    # 3. Warmstart OCR module
+    if args.warmstart_ocr:
+        if os.path.exists(args.warmstart_ocr):
+            print(f"📦 Warm-starting OCR module from {args.warmstart_ocr}")
+            ocr_state = torch.load(args.warmstart_ocr, map_location=config.DEVICE)
+            
+            target_ocr = getattr(model, 'ocr_net', None)
+            if target_ocr is not None:
+                # Target is model.ocr_net (e.g. MultiFrameSRResTran)
+                ocr_sub_state = {}
+                for k, v in ocr_state.items():
+                    clean_k = k.replace("ocr_net.", "")
+                    ocr_sub_state[clean_k] = v
+                missing, unexpected = target_ocr.load_state_dict(ocr_sub_state, strict=False)
+                matched = len(ocr_sub_state) - len(unexpected)
+                print(f"   ✅ OCR module weights loaded: {matched} keys matched into ocr_net (missing: {len(missing)})")
+            else:
+                # Target is root model (e.g. ResTranOCR)
+                missing, unexpected = model.load_state_dict(ocr_state, strict=False)
+                matched = len(ocr_state) - len(unexpected)
+                print(f"   ✅ Model weights loaded directly: {matched} keys matched (missing: {len(missing)})")
+        else:
+            print(f"❌ ERROR: OCR checkpoint not found at {args.warmstart_ocr}")
+            sys.exit(1)
+
+    # 4. Freeze SR module if requested (Bug 4 fix)
+    if args.freeze_sr:
+        if hasattr(model, 'sr_net'):
+            for p in model.sr_net.parameters():
+                p.requires_grad = False
+            model.sr_net.eval()
+            config.FREEZE_SR = True
+            print("❄️ Super-Resolution Module FROZEN (requires_grad = False). Protecting SR filters from gradient distortion.")
+        else:
+            print(f"⚠️ Model {config.MODEL_TYPE} does not have 'sr_net'. --freeze-sr ignored.")
+
     # Print model summary
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)

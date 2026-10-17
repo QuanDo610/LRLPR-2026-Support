@@ -234,3 +234,5 @@ __pycache__
 .venv
 dataset/
 data/
+kaggle_push/
+kaggle_push_kernel/

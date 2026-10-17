@@ -37,48 +37,47 @@ def main():
     
     print(f"Running on Device: {device}")
     
-    # Define Ablations
-    ablations = [
-        {"name": "(1) Baseline (No SR, Bicubic)", "use_sr": False, "use_stn": True},
-        {"name": "(2) StackedSRNet (MSE only)", "use_sr": True, "use_stn": True},
-        {"name": "(3) StackedSRNet (MSE+Perc+Edge)", "use_sr": True, "use_stn": True},
-        {"name": "(4) No STN (SR + ResTran)", "use_sr": True, "use_stn": False},
+    from src.models.restran import ResTranOCR
+    from src.models.sr_restran import MultiFrameSRResTran
+    from src.models.sr_vit import MultiFrameSRViT
+    from src.models.crnn import MultiFrameCRNN
+    
+    # Define Architectures
+    architectures = [
+        {"name": "Flow 1: CRNN (+STN)", "type": "crnn", "use_stn": True},
+        {"name": "Flow 1: ResTran34 Baseline (+STN)", "type": "restran", "use_stn": True},
+        {"name": "Flow 1: ResTran34 (No STN)", "type": "restran", "use_stn": False},
+        {"name": "Flow 2: MultiFrameSRResTran (+STN)", "type": "sr_restran", "use_stn": True},
+        {"name": "Flow 2: MultiFrameSRResTran (No STN)", "type": "sr_restran", "use_stn": False},
+        {"name": "Flow 3: MultiFrameSRViT (Proposed)", "type": "sr_vit", "use_stn": False},
     ]
     
-    dummy_input = torch.randn(1, 5, 3, 16, 48).to(device)
+    lr_input = torch.randn(1, 5, 3, 16, 64).to(device)
+    hr_input = torch.randn(1, 5, 3, 32, 128).to(device)
     
-    print(f"{'Experiment':<35} | {'Params (M)':<12} | {'P95 Latency (ms)':<16}")
-    print("-" * 70)
+    print(f"{'Architecture / Pipeline':<40} | {'Params (M)':<12} | {'P95 Latency (ms)':<16} | {'FPS':<10}")
+    print("-" * 85)
     
-    for exp in ablations:
-        if exp["use_sr"]:
-            model = End2EndLPR(
-                num_classes=config.NUM_CLASSES,
-                sr_num_blocks=8,
-                use_stn=exp["use_stn"],
-                pretrained=False
-            ).to(device)
-        else:
-            # Baseline just uses ResTranOCR, assume upscaled input
-            from src.models.restran import ResTranOCR
-            model = ResTranOCR(
-                num_classes=config.NUM_CLASSES,
-                use_stn=exp["use_stn"],
-                pretrained=False
-            ).to(device)
-            # ResTran expects [Batch, Frames, 3, H, W] but at 32x96 (upscaled)
-            # So for baseline, we feed upscaled dummy input
-            dummy_input_baseline = torch.randn(1, 5, 3, 32, 96).to(device)
+    for arch in architectures:
+        a_type = arch["type"]
+        if a_type == "crnn":
+            model = MultiFrameCRNN(num_classes=config.NUM_CLASSES, use_stn=arch["use_stn"]).to(device)
+            inp = hr_input
+        elif a_type == "restran":
+            model = ResTranOCR(num_classes=config.NUM_CLASSES, use_stn=arch["use_stn"], pretrained=False).to(device)
+            inp = hr_input
+        elif a_type == "sr_restran":
+            model = MultiFrameSRResTran(num_classes=config.NUM_CLASSES, use_stn=arch["use_stn"], pretrained=False).to(device)
+            inp = lr_input
+        elif a_type == "sr_vit":
+            model = MultiFrameSRViT(num_classes=config.NUM_CLASSES).to(device)
+            inp = lr_input
             
         total_params = sum(p.numel() for p in model.parameters()) / 1e6
+        latency = measure_latency(model, inp, device)
+        fps = 1000.0 / latency if latency > 0 else 0
         
-        # Measure latency
-        if exp["use_sr"]:
-            latency = measure_latency(model, dummy_input, device)
-        else:
-            latency = measure_latency(model, dummy_input_baseline, device)
-            
-        print(f"{exp['name']:<35} | {total_params:>10.2f} M | {latency:>10.2f} ms")
+        print(f"{arch['name']:<40} | {total_params:>10.2f} M | {latency:>10.2f} ms | {fps:>8.1f}")
 
 if __name__ == "__main__":
     main()

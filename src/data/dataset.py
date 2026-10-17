@@ -6,6 +6,8 @@ import random
 from typing import Any, Dict, List, Tuple
 
 import cv2
+cv2.setNumThreads(0)
+cv2.ocl.setUseOpenCL(False)
 import numpy as np
 import torch
 from torch.utils.data import Dataset

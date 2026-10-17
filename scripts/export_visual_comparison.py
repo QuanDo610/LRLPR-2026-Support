@@ -2,11 +2,14 @@ import torch
 import cv2
 import numpy as np
 import os
+import sys
 import matplotlib.pyplot as plt
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from configs.config import get_default_config
 from train_joint import JointDataset
-from src.models.end2end_lpr import End2EndLPR
+from src.models.sr_restran import MultiFrameSRResTran
 from src.training.trainer import decode_with_confidence
 
 def unnormalize(tensor):
@@ -24,15 +27,20 @@ def main():
     
     val_dataset = JointDataset(config.DATA_ROOT, config.VAL_SPLIT_FILE, config.CHAR2IDX, mode='val')
     
-    model = End2EndLPR(
+    model = MultiFrameSRResTran(
         num_classes=config.NUM_CLASSES,
         sr_num_blocks=8,
-        ocr_transformer_layers=2,
+        use_stn=True,
         pretrained=False
     ).to(device)
     
-    checkpoint_path = "results/end2end_joint_best.pth"
-    model.load_state_dict(torch.load(checkpoint_path, map_location=device))
+    checkpoint_path = "results/decoupled_restran_best.pth"
+    if not os.path.exists(checkpoint_path):
+        checkpoint_path = "results/flow2_warmstart_init.pth"
+    if not os.path.exists(checkpoint_path):
+        checkpoint_path = "results/sr_restran_best.pth"
+        
+    model.load_state_dict(torch.load(checkpoint_path, map_location=device), strict=False)
     model.eval()
     
     os.makedirs("QQ/visualizations", exist_ok=True)
@@ -54,7 +62,10 @@ def main():
             pred_text, conf = decoded[0]
             
             # Prepare Images
-            sr_img = unnormalize(sr_tensor[0])
+            if sr_tensor.dim() == 5:
+                sr_img = unnormalize(sr_tensor[0, 2])
+            else:
+                sr_img = unnormalize(sr_tensor[0])
             lr_frames = [unnormalize(lr_tensor[0, f]) for f in range(5)]
             
             # Bicubic baseline for frame 2 (center)

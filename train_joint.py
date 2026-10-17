@@ -239,22 +239,39 @@ def main():
     if os.path.exists(decoupled_path):
         print(f"📦 Warm-starting FULL MODEL from decoupled weights: {decoupled_path}")
         checkpoint = torch.load(decoupled_path, map_location=device)
-        state_dict = checkpoint["state_dict"] if "state_dict" in checkpoint else checkpoint
-        model.load_state_dict(state_dict, strict=False)
+        state_dict = checkpoint["state_dict"] if isinstance(checkpoint, dict) and "state_dict" in checkpoint else checkpoint
+        
+        # [FIX LỖI #3]: Chuẩn hóa tiền tố key cho End2EndLPR nếu checkpoint được lưu từ standalone model
+        if config.MODEL_TYPE != "sr_vit":
+            new_state_dict = {}
+            for k, v in state_dict.items():
+                if not k.startswith("ocr_net.") and not k.startswith("sr_net."):
+                    new_state_dict[f"ocr_net.{k}"] = v
+                else:
+                    new_state_dict[k] = v
+        else:
+            new_state_dict = state_dict
+
+        missing, unexpected = model.load_state_dict(new_state_dict, strict=False)
+        print(f"  Missing keys: {len(missing)}, Unexpected keys: {len(unexpected)}")
+        if config.MODEL_TYPE != "sr_vit":
+            missing_ocr = [k for k in missing if "ocr_net" in k]
+            assert len(missing_ocr) == 0, f"LỖI: Trọng số OCR chưa được nạp đầy đủ! ({len(missing_ocr)} keys missing)"
     elif os.path.exists(sr_weights_path):
         print(f"📦 Warm-starting ONLY SR module from {sr_weights_path}")
         model.sr_net.load_state_dict(torch.load(sr_weights_path, map_location=device), strict=False)
     
-    # Separate Learning Rates with AdamW
+    # [FIX LỖI #2]: Separate Learning Rates with AdamW, trả weight_decay về mức 1e-4 an toàn
     sr_params = [p for n, p in model.named_parameters() if 'sr_net' in n]
     ocr_params = [p for n, p in model.named_parameters() if 'sr_net' not in n]
     
     optimizer = optim.AdamW([
-        {'params': sr_params, 'lr': LR_SR, 'weight_decay': 1e-4},
-        {'params': ocr_params, 'lr': LR_OCR, 'weight_decay': 0.05}
+        {'params': sr_params, 'lr': 1e-4, 'weight_decay': 1e-4},
+        {'params': ocr_params, 'lr': 5e-4, 'weight_decay': 1e-4}
     ])
     
-    scheduler = optim.lr_scheduler.OneCycleLR(optimizer, max_lr=[LR_SR, LR_OCR], epochs=EPOCHS, steps_per_epoch=len(train_loader), pct_start=0.1, div_factor=25, final_div_factor=1000)
+    # [FIX LỖI #2]: Sử dụng CosineAnnealingLR chuẩn, step mỗi epoch ở cuối epoch
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS, eta_min=1e-6)
     
     ctc_loss_fn = torch.nn.CTCLoss(blank=0, zero_infinity=True).to(device)
     sr_loss_fn = SRLoss(w_mse=1.0, w_perceptual=0.1, w_edge=0.1, device=device)
@@ -286,7 +303,7 @@ def main():
                 else:
                     loss_ctc = ctc_loss_fn(preds_permuted.float(), targets, input_lengths, target_lengths)
                 
-                # SR Loss (only for synthetic data where we have HR)
+                # [FIX LỖI #4]: SR Loss (Supervision trên Synthetic, Self-Supervised TV Loss trên Real data)
                 if is_synth.any():
                     sr_image_synth = sr_image[is_synth]
                     hr_synth = hr[is_synth]
@@ -294,7 +311,10 @@ def main():
                     center_idx = sr_image_synth.size(1) // 2
                     loss_sr = sr_loss_fn(sr_image_synth[:, center_idx, :, :, :], hr_synth)
                 else:
-                    loss_sr = torch.tensor(0.0, device=device)
+                    # Self-supervised Total Variation (TV) loss nhẹ chống gradient CTC làm nhiễu bộ lọc SR
+                    tv_h = torch.abs(sr_image[:, :, :, 1:, :] - sr_image[:, :, :, :-1, :]).mean()
+                    tv_w = torch.abs(sr_image[:, :, :, :, 1:] - sr_image[:, :, :, :, :-1]).mean()
+                    loss_sr = 0.01 * (tv_h + tv_w)
                     
                 loss = loss_ctc + LAMBDA_SR * loss_sr
                 
@@ -328,6 +348,8 @@ def main():
                     
         val_acc = (total_correct / total_val_samples) * 100 if total_val_samples > 0 else 0.0
         current_lr = scheduler.get_last_lr()[1]
+        # [FIX LỖI #2]: Gọi scheduler.step() mỗi epoch một lần ở cuối epoch
+        scheduler.step()
         
         print(f"📊 Epoch {epoch+1}/{EPOCHS} -> Train Loss: {avg_loss:.4f} | Val Acc: {val_acc:.2f}% | Best Acc: {max(best_val_acc, val_acc):.2f}% | LR: {current_lr:.2e}")
         
