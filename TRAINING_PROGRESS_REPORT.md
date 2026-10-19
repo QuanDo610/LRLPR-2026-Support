@@ -31,6 +31,7 @@ Tài liệu này là file báo cáo **duy nhất** theo dõi liên tục tiến 
 | 22 | 2026-10-19 21:25:02 | `train.py` (Model: `sr_vit` - Flow 3 ViT) | **4.0%** | PID: `15025` (4 workers fork). Đã chạy liên tục **4h57m**. Hoàn tất Epoch 1/40, hiện đang chạy Epoch 2/40 (batch 360/594 ~61%). CTC loss giảm sâu từ 3.35 xuống ~2.82 - 2.88. Log: `results/train_flow3_local.log`. |
 | 23 | 2026-10-19 22:46:12 | `train.py` (Model: `sr_vit` - Flow 3 ViT) | **8.5%** | PID: `15025` (4 workers fork). Đã chạy liên tục **6h18m**. Đã hoàn tất 3/40 epochs (Val Loss giảm đều: 3.218 -> 3.133 -> 3.091), hiện đang chạy Epoch 4/40 (batch 241/594 ~41%). Train loss hạ xuống mức 2.75 - 2.80. Log: `results/train_flow3_local.log`. |
 | 24 | 2026-10-19 23:26:23 | `train.py` (Model: `sr_vit` - Flow 3 ViT) | **Dừng theo yêu cầu** | Đã hủy tiến trình huấn luyện tại Epoch 04/40 theo chỉ thị người dùng. Toàn bộ tiến trình con và tài nguyên CPU/MPS đã được giải phóng 100%. |
+| 25 | 2026-10-19 23:31:42 | `train.py` (Model: `sr_restran_flow2_push80` - Handoff v2.1) | **0.5%** | PID: `33970` (bọc `caffeinate -dimsu`). Khởi chạy Phương án 2A theo Handoff Spec v2.1 (gỡ tanh STN, kẹp gradient STN 0.5, `sr_lr` bảo vệ 0.2x, `ocr_lr_scale=0.8`). Huấn luyện 20 epochs fine-tune từ mốc đỉnh cao **76.68%** (Checkpoint: `results/decoupled_restran_best.pth`). Log: `results/train_flow2_push80.log`. |
 
 ---
 
