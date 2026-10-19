@@ -153,6 +153,12 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Use HardCharacterCTCLoss instead of standard nn.CTCLoss",
     )
+    parser.add_argument(
+        "--ocr-lr-scale",
+        type=float,
+        default=1.0,
+        help="Scale multiplier for OCR parameter learning rate (default: 1.0)",
+    )
     return parser.parse_args()
 
 
@@ -206,6 +212,7 @@ def main():
     config.WARMSTART_OCR = bool(args.warmstart_ocr)
     config.WARMSTART_SR = bool(args.warmstart_sr)
     config.HAS_CHECKPOINT = bool(args.checkpoint)
+    config.OCR_LR_SCALE = getattr(args, 'ocr_lr_scale', 1.0)
 
     if args.dry_run:
         config.DRY_RUN = True
@@ -334,12 +341,30 @@ def main():
         pin_memory=(config.DEVICE.type == 'cuda')
     )
 
+    # Auto-detect transformer layers from checkpoint if provided
+    detected_tf_layers = None
+    if args.checkpoint and os.path.exists(args.checkpoint):
+        try:
+            ckpt_peek = torch.load(args.checkpoint, map_location="cpu")
+            if isinstance(ckpt_peek, dict):
+                sd_peek = ckpt_peek.get("state_dict", ckpt_peek.get("model", ckpt_peek))
+                layer_indices = set()
+                for k in sd_peek.keys():
+                    if "layers." in k:
+                        parts = k.split(".")
+                        for i, part in enumerate(parts):
+                            if part == "layers" and i + 1 < len(parts) and parts[i + 1].isdigit():
+                                layer_indices.add(int(parts[i + 1]))
+                if layer_indices:
+                    detected_tf_layers = max(layer_indices) + 1
+                    print(f"🔍 Auto-detected {detected_tf_layers} transformer layers from resume checkpoint {args.checkpoint}")
+        except Exception as e:
+            pass
+
     # Initialize model based on config
     if config.MODEL_TYPE == "sr_vit":
         from src.models.sr_vit import MultiFrameSRViT
-        # Calculate max_seq_len for SR image (in_h*2 x in_w*2)
-        sr_h = in_h * 2
-        sr_w = in_w * 2
+        vit_layers = detected_tf_layers if detected_tf_layers is not None else config.SR_VIT_NUM_LAYERS
         model = MultiFrameSRViT(
             num_classes=config.NUM_CLASSES,
             sr_num_blocks=8,
@@ -347,30 +372,33 @@ def main():
             patch_w=config.SR_VIT_PATCH_W,
             embed_dim=config.SR_VIT_EMBED_DIM,
             num_heads=config.SR_VIT_NUM_HEADS,
-            num_layers=config.SR_VIT_NUM_LAYERS,
+            num_layers=vit_layers,
             ff_dim=config.SR_VIT_FF_DIM,
             dropout=config.TRANSFORMER_DROPOUT,
-            max_seq_len=(sr_h // config.SR_VIT_PATCH_H) * (sr_w // config.SR_VIT_PATCH_W),
+            max_seq_len=128,
             use_stn=config.USE_STN,
+            pretrained=getattr(config, 'BACKBONE_PRETRAINED', True),
         ).to(config.DEVICE)
     elif config.MODEL_TYPE == "sr_restran":
         from src.models.sr_restran import MultiFrameSRResTran
+        tf_layers = detected_tf_layers if detected_tf_layers is not None else config.TRANSFORMER_LAYERS
         model = MultiFrameSRResTran(
             num_classes=config.NUM_CLASSES,
             sr_num_blocks=8,
             sr_scale_factor=2,
             transformer_heads=config.TRANSFORMER_HEADS,
-            transformer_layers=config.TRANSFORMER_LAYERS,
+            transformer_layers=tf_layers,
             transformer_ff_dim=config.TRANSFORMER_FF_DIM,
             dropout=config.TRANSFORMER_DROPOUT,
             use_stn=config.USE_STN,
             pretrained=getattr(config, 'BACKBONE_PRETRAINED', True),
         ).to(config.DEVICE)
     elif config.MODEL_TYPE == "restran":
+        tf_layers = detected_tf_layers if detected_tf_layers is not None else config.TRANSFORMER_LAYERS
         model = ResTranOCR(
             num_classes=config.NUM_CLASSES,
             transformer_heads=config.TRANSFORMER_HEADS,
-            transformer_layers=config.TRANSFORMER_LAYERS,
+            transformer_layers=tf_layers,
             transformer_ff_dim=config.TRANSFORMER_FF_DIM,
             dropout=config.TRANSFORMER_DROPOUT,
             use_stn=config.USE_STN,
@@ -424,6 +452,14 @@ def main():
                     if new_k in target_sr_dict:
                         if v.shape == target_sr_dict[new_k].shape:
                             adapted_sr_state[new_k] = v
+                        elif (
+                            new_k == "head.weight"
+                            and v.shape == (64, 15, 3, 3)
+                            and target_sr_dict[new_k].shape == (64, 3, 3, 3)
+                        ):
+                            # Quy đổi bộ lọc 15 kênh (5 frames x 3 RGB) sang 3 kênh bằng trung bình 5 frames
+                            adapted_sr_state[new_k] = v.view(64, 5, 3, 3, 3).mean(dim=1)
+                            print("   🔄 Converted 15-channel conv_first.weight [64,15,3,3] -> 3-channel head.weight [64,3,3,3] via 5-frame mean.")
                         else:
                             skipped_shapes += 1
                 if adapted_sr_state:

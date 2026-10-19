@@ -25,9 +25,18 @@ Tài liệu này là file báo cáo **duy nhất** theo dõi liên tục tiến 
 | 15 | 2026-10-19 11:42:27 | `train.py` (Model: `sr_restran_flow2` - Warmstart 76.68%) | **23.0%** | PID: `2722` (4 workers fork). Bắt đầu lúc 10:19 (đã chạy 1h24m). Huấn luyện tinh chỉnh 20 epochs trên Full Dataset (`batch_size=64`, lr 1.5e-4) warmstart từ checkpoint 76.68%. Đã xong 4 epochs, hiện đang ở Epoch 05/20 (batch 375/594 ~63%). Log: `results/train_flow2_warmstart76.log`. |
 | 16 | 2026-10-19 14:46:36 | `train.py` (Model: `sr_restran_flow2` - Warmstart 76.68%) | **76.0%** | PID: `2722` (4 workers fork). Đã chạy **4h28m**. Hoàn tất 15/20 epochs, hiện đang chạy Epoch 16/20 (batch 56/594 ~9%). Vừa vượt mốc 70%: **Val Acc đạt 70.07%** tại Epoch 15 (Train Loss: 0.1880). Log: `results/train_flow2_warmstart76.log`. |
 | 18 | 2026-10-19 16:13:50 | `train.py` (Model: `sr_restran_flow2` - Warmstart 76.68%) | **100.0%** (Hoàn thành) | PID: `2722` đã hoàn tất trọn vẹn đủ 20/20 epochs (chạy 5h54m). Val Acc đạt đỉnh 70.57% ở Epoch 16, kết thúc Epoch 20 đạt 69.07% (Train Loss: 0.1709). Best Checkpoint bảo toàn mốc **76.68% Exact Match**, **CER 6.49%**, **Normalized Edit Acc 93.51%** (`results/sr_restran_flow2_best.pth`). Log: `results/train_flow2_warmstart76.log`. |
-| 19 | 2026-10-19 16:28:12 | `train.py` (Model: `sr_vit` - Flow 3 ViT) | **5.0%** | PID: `3482` (4 workers fork). Bắt đầu lúc 16:28. Huấn luyện 40 epochs theo Handoff Spec (`batch_size=64`, lr 3e-4) warmstart SR từ `results/sr_net_best.pth`. Đã hoàn tất Epoch 1 (Train Loss: 3.3553), đang chạy Epoch 2/40. Log: `results/train_flow3_local.log`. |
+| 19 | 2026-10-19 23:26:23 | `train.py` (Model: `sr_vit` - Flow 3 ViT) | **Dừng theo yêu cầu** | Đã dừng tiến trình huấn luyện theo yêu cầu của người dùng. Tài nguyên CPU/MPS đã được giải phóng hoàn toàn. Log ghi nhận tại: `results/train_flow3_local.log`. |
+| 20 | 2026-10-19 19:30:32 | `train.py` (Model: `sr_vit` - Flow 3 ViT) | **3.2%** | PID: `15025` (4 workers fork). Đã chạy liên tục **3h03m**. Hoàn tất Epoch 1/40, hiện đang chạy Epoch 2/40 (batch 158/594 ~27%). Mạng ViT đang tối ưu CTC loss qua các batch (Loss: 2.92 - 2.98). Log: `results/train_flow3_local.log`. |
+| 21 | 2026-10-19 19:40:32 | `train.py` (Model: `sr_vit` - Flow 3 ViT) | **3.3%** | PID: `15025` (4 workers fork). Đã chạy **3h12m**. Hoàn tất Epoch 1/40, hiện đang ở Epoch 2/40 (batch 177/594 ~30%). Mạng ViT tiếp tục hạ loss đều đặn (Loss: 2.90 - 2.97). Log: `results/train_flow3_local.log`. |
+| 22 | 2026-10-19 21:25:02 | `train.py` (Model: `sr_vit` - Flow 3 ViT) | **4.0%** | PID: `15025` (4 workers fork). Đã chạy liên tục **4h57m**. Hoàn tất Epoch 1/40, hiện đang chạy Epoch 2/40 (batch 360/594 ~61%). CTC loss giảm sâu từ 3.35 xuống ~2.82 - 2.88. Log: `results/train_flow3_local.log`. |
+| 23 | 2026-10-19 22:46:12 | `train.py` (Model: `sr_vit` - Flow 3 ViT) | **8.5%** | PID: `15025` (4 workers fork). Đã chạy liên tục **6h18m**. Đã hoàn tất 3/40 epochs (Val Loss giảm đều: 3.218 -> 3.133 -> 3.091), hiện đang chạy Epoch 4/40 (batch 241/594 ~41%). Train loss hạ xuống mức 2.75 - 2.80. Log: `results/train_flow3_local.log`. |
+| 24 | 2026-10-19 23:26:23 | `train.py` (Model: `sr_vit` - Flow 3 ViT) | **Dừng theo yêu cầu** | Đã hủy tiến trình huấn luyện tại Epoch 04/40 theo chỉ thị người dùng. Toàn bộ tiến trình con và tài nguyên CPU/MPS đã được giải phóng 100%. |
 
 ---
+
+
+
+
 
 
 

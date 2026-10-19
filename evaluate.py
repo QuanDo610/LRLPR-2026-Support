@@ -119,55 +119,7 @@ def main():
     if args.no_stn:
         config.USE_STN = False
 
-    # 2. Instantiate model
-    if args.model == "sr_vit":
-        from src.models.sr_vit import MultiFrameSRViT
-        in_h, in_w = config.IMG_HEIGHT, config.IMG_WIDTH
-        model = MultiFrameSRViT(
-            num_classes=config.NUM_CLASSES,
-            sr_num_blocks=8,
-            patch_h=config.SR_VIT_PATCH_H,
-            patch_w=config.SR_VIT_PATCH_W,
-            embed_dim=config.SR_VIT_EMBED_DIM,
-            num_heads=config.SR_VIT_NUM_HEADS,
-            num_layers=config.SR_VIT_NUM_LAYERS,
-            ff_dim=config.SR_VIT_FF_DIM,
-            dropout=config.TRANSFORMER_DROPOUT,
-            max_seq_len=((in_h * 2) // config.SR_VIT_PATCH_H) * ((in_w * 2) // config.SR_VIT_PATCH_W),
-            use_stn=config.USE_STN,
-        )
-    elif args.model in ["end2end", "sr_restran"]:
-        from src.models.sr_restran import MultiFrameSRResTran
-        model = MultiFrameSRResTran(
-            num_classes=config.NUM_CLASSES,
-            sr_num_blocks=8,
-            sr_scale_factor=2,
-            transformer_heads=config.TRANSFORMER_HEADS,
-            transformer_layers=2 if args.model == "end2end" else config.TRANSFORMER_LAYERS,
-            transformer_ff_dim=config.TRANSFORMER_FF_DIM,
-            dropout=config.TRANSFORMER_DROPOUT,
-            use_stn=config.USE_STN,
-            pretrained=False,
-        )
-    elif args.model == "restran":
-        model = ResTranOCR(
-            num_classes=config.NUM_CLASSES,
-            transformer_heads=config.TRANSFORMER_HEADS,
-            transformer_layers=config.TRANSFORMER_LAYERS,
-            transformer_ff_dim=config.TRANSFORMER_FF_DIM,
-            dropout=config.TRANSFORMER_DROPOUT,
-            use_stn=config.USE_STN,
-            pretrained=False,
-        )
-    else:
-        model = MultiFrameCRNN(
-            num_classes=config.NUM_CLASSES,
-            hidden_size=config.HIDDEN_SIZE,
-            rnn_dropout=config.RNN_DROPOUT,
-            use_stn=config.USE_STN,
-        )
-
-    # 3. Load trained weights
+    # 2. Load trained weights & auto-detect architecture
     weights_path = args.weights
     if not os.path.exists(weights_path):
         print(f"❌ ERROR: Model checkpoint not found at {weights_path}")
@@ -181,10 +133,77 @@ def main():
         state_dict = checkpoint["model"]
     else:
         state_dict = checkpoint
+
+    detected_tf_layers = None
+    if isinstance(state_dict, dict):
+        layer_indices = set()
+        for k in state_dict.keys():
+            if "layers." in k:
+                parts = k.split(".")
+                for i, part in enumerate(parts):
+                    if part == "layers" and i + 1 < len(parts) and parts[i + 1].isdigit():
+                        layer_indices.add(int(parts[i + 1]))
+        if layer_indices:
+            detected_tf_layers = max(layer_indices) + 1
+            print(f"   🔍 Auto-detected {detected_tf_layers} transformer layers from checkpoint")
+
+    # 3. Instantiate model
+    if args.model == "sr_vit":
+        from src.models.sr_vit import MultiFrameSRViT
+        vit_layers = detected_tf_layers if detected_tf_layers is not None else config.SR_VIT_NUM_LAYERS
+        model = MultiFrameSRViT(
+            num_classes=config.NUM_CLASSES,
+            sr_num_blocks=8,
+            patch_h=config.SR_VIT_PATCH_H,
+            patch_w=config.SR_VIT_PATCH_W,
+            embed_dim=config.SR_VIT_EMBED_DIM,
+            num_heads=config.SR_VIT_NUM_HEADS,
+            num_layers=vit_layers,
+            ff_dim=config.SR_VIT_FF_DIM,
+            dropout=config.TRANSFORMER_DROPOUT,
+            max_seq_len=128,
+            use_stn=config.USE_STN,
+            pretrained=False,
+        )
+    elif args.model in ["end2end", "sr_restran"]:
+        from src.models.sr_restran import MultiFrameSRResTran
+        tf_layers = detected_tf_layers if detected_tf_layers is not None else (2 if args.model == "end2end" else config.TRANSFORMER_LAYERS)
+        model = MultiFrameSRResTran(
+            num_classes=config.NUM_CLASSES,
+            sr_num_blocks=8,
+            sr_scale_factor=2,
+            transformer_heads=config.TRANSFORMER_HEADS,
+            transformer_layers=tf_layers,
+            transformer_ff_dim=config.TRANSFORMER_FF_DIM,
+            dropout=config.TRANSFORMER_DROPOUT,
+            use_stn=config.USE_STN,
+            pretrained=False,
+        )
+    elif args.model == "restran":
+        tf_layers = detected_tf_layers if detected_tf_layers is not None else config.TRANSFORMER_LAYERS
+        model = ResTranOCR(
+            num_classes=config.NUM_CLASSES,
+            transformer_heads=config.TRANSFORMER_HEADS,
+            transformer_layers=tf_layers,
+            transformer_ff_dim=config.TRANSFORMER_FF_DIM,
+            dropout=config.TRANSFORMER_DROPOUT,
+            use_stn=config.USE_STN,
+            pretrained=False,
+        )
+    else:
+        model = MultiFrameCRNN(
+            num_classes=config.NUM_CLASSES,
+            hidden_size=config.HIDDEN_SIZE,
+            rnn_dropout=config.RNN_DROPOUT,
+            use_stn=config.USE_STN,
+        )
         
     # Backward-compatible loading (e.g. checkpoints before res_scale_gate)
     missing, unexpected = model.load_state_dict(state_dict, strict=False)
-    critical_missing = [k for k in missing if k != "sr_net.res_scale_gate"]
+    critical_missing = [
+        k for k in missing
+        if k not in ["sr_net.res_scale_gate", "ocr_net.stn.identity_theta", "stn.identity_theta"]
+    ]
     if critical_missing:
         print(f"⚠️ WARNING: Missing {len(critical_missing)} keys during load: {critical_missing[:5]}...")
     else:

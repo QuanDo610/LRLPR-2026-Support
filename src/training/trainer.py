@@ -72,13 +72,24 @@ class Trainer:
             else:
                 ocr_params.append(param)
 
+        self.stn_params = stn_params
+        has_checkpoint = getattr(config, 'HAS_CHECKPOINT', False)
+        warmstart_sr = getattr(config, 'WARMSTART_SR', False)
+
         param_groups = []
         max_lrs = []
         if sr_params:
-            param_groups.append({'params': sr_params, 'lr': base_lr})
-            max_lrs.append(base_lr)
+            if has_checkpoint:
+                sr_lr = base_lr * 0.2
+            elif warmstart_sr:
+                sr_lr = base_lr * 0.5
+            else:
+                sr_lr = base_lr
+            param_groups.append({'params': sr_params, 'lr': sr_lr})
+            max_lrs.append(sr_lr)
         if ocr_params:
-            ocr_lr = base_lr * 0.2 if (warmstart_ocr and hasattr(model, 'sr_net')) else base_lr
+            ocr_scale = getattr(config, 'OCR_LR_SCALE', 1.0)
+            ocr_lr = (base_lr * 0.5 if (warmstart_ocr and hasattr(model, 'sr_net')) else base_lr) * ocr_scale
             param_groups.append({'params': ocr_params, 'lr': ocr_lr})
             max_lrs.append(ocr_lr)
         if stn_params:
@@ -191,7 +202,11 @@ class Trainer:
             # Unscale (required before gradient clipping)
             self.scaler.unscale_(self.optimizer)
             
-            # Gradient clipping
+            # Dedicated STN gradient clipping to prevent Epoch-10/14 affine explosion
+            if self.stn_params:
+                torch.nn.utils.clip_grad_norm_(self.stn_params, max_norm=0.5)
+            
+            # Global gradient clipping
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.GRAD_CLIP)
             
             # Save scale before step for scheduler check

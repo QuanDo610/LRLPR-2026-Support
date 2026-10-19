@@ -139,3 +139,14 @@ def decode_with_confidence(
         results.append((pred_str, confidence))
 
     return results
+
+
+class CTCDecoder:
+    """Convenience CTC decoder wrapper around decode_with_confidence."""
+    def __init__(self, idx2char: Dict[int, str], blank_idx: int = 0):
+        self.idx2char = idx2char
+        self.blank_idx = blank_idx
+
+    def decode_batch(self, preds: torch.Tensor, use_format_prior: bool = False) -> List[str]:
+        results = decode_with_confidence(preds, self.idx2char, use_format_prior=use_format_prior)
+        return [text for text, _ in results]

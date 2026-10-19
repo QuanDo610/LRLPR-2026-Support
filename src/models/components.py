@@ -33,9 +33,9 @@ class STNBlock(nn.Module):
             nn.Linear(128, 6)
         )
         
-        # Initialize the weights/bias with zero offset around identity transformation
+        # Initialize the weights/bias with identity transformation
         self.fc_loc[-1].weight.data.zero_()
-        self.fc_loc[-1].bias.data.zero_()
+        self.fc_loc[-1].bias.data.copy_(torch.tensor([1, 0, 0, 0, 1, 0], dtype=torch.float))
         self.register_buffer(
             "identity_theta",
             torch.tensor([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], dtype=torch.float)
@@ -46,26 +46,15 @@ class STNBlock(nn.Module):
         Args:
             x: Input images [Batch, C, H, W]
         Returns:
-            theta: Bounded Affine transformation matrix [Batch, 2, 3]
+            theta: Affine transformation matrix [Batch, 2, 3]
         """
         xs = self.localization(x)
         raw_theta = self.fc_loc(xs).view(-1, 2, 3)
-        identity = self.identity_theta.unsqueeze(0).to(raw_theta.dtype)
-        # Detect identity-bias convention (legacy checkpoints) vs zero-bias convention (new models):
-        # In legacy checkpoints, diagonal elements raw_theta[:, 0, 0] and [:, 1, 1] are centered around 1.0.
-        is_identity_bias = (raw_theta[:, 0, 0].detach().mean() + raw_theta[:, 1, 1].detach().mean()) > 1.0
-        if is_identity_bias:
-            delta = raw_theta - identity
-            if self.training:
-                # Protect against gradient explosion during training while preserving unit gradient near identity
-                theta = identity + 0.35 * torch.tanh(delta / 0.35)
-            else:
-                # During evaluation, preserve trained affine matrix exactly
-                theta = raw_theta
-        else:
-            # Zero-bias model: delta is directly predicted around 0
-            theta = identity + 0.35 * torch.tanh(raw_theta)
-        return theta
+        # Backward compatibility if a checkpoint was saved with zero-bias convention:
+        if (self.fc_loc[-1].bias[0].detach() + self.fc_loc[-1].bias[4].detach()) < 0.5:
+            identity = self.identity_theta.unsqueeze(0).to(raw_theta.dtype)
+            return identity + raw_theta
+        return raw_theta
 
 
 class AttentionFusion(nn.Module):
