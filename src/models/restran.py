@@ -78,4 +78,4 @@ class ResTranOCR(nn.Module):
         seq_out = self.transformer(seq_input) # [B, W', C]
         
         out = self.head(seq_out)              # [B, W', Num_Classes]
-        return out.log_softmax(2)
+        return out.float().log_softmax(2)

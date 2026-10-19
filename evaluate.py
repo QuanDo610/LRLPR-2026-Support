@@ -40,7 +40,7 @@ def parse_args():
     parser.add_argument(
         "-m", "--model",
         type=str,
-        default="end2end",
+        default="restran",
         choices=["crnn", "restran", "end2end", "sr_restran", "sr_vit"],
         help="Model architecture to evaluate",
     )
@@ -67,6 +67,16 @@ def parse_args():
         type=int,
         default=64,
         help="Batch size for evaluation",
+    )
+    parser.add_argument(
+        "--no-stn",
+        action="store_true",
+        help="Disable STN module",
+    )
+    parser.add_argument(
+        "--no-format-prior",
+        action="store_true",
+        help="Disable 7-character plate format grammar constraint in decoding",
     )
     return parser.parse_args()
 
@@ -106,9 +116,13 @@ def main():
     )
     print(f"📊 Loaded {len(val_ds)} validation tracks ({len(val_loader)} batches)")
 
+    if args.no_stn:
+        config.USE_STN = False
+
     # 2. Instantiate model
     if args.model == "sr_vit":
         from src.models.sr_vit import MultiFrameSRViT
+        in_h, in_w = config.IMG_HEIGHT, config.IMG_WIDTH
         model = MultiFrameSRViT(
             num_classes=config.NUM_CLASSES,
             sr_num_blocks=8,
@@ -118,6 +132,9 @@ def main():
             num_heads=config.SR_VIT_NUM_HEADS,
             num_layers=config.SR_VIT_NUM_LAYERS,
             ff_dim=config.SR_VIT_FF_DIM,
+            dropout=config.TRANSFORMER_DROPOUT,
+            max_seq_len=((in_h * 2) // config.SR_VIT_PATCH_H) * ((in_w * 2) // config.SR_VIT_PATCH_W),
+            use_stn=config.USE_STN,
         )
     elif args.model in ["end2end", "sr_restran"]:
         from src.models.sr_restran import MultiFrameSRResTran
@@ -125,7 +142,10 @@ def main():
             num_classes=config.NUM_CLASSES,
             sr_num_blocks=8,
             sr_scale_factor=2,
+            transformer_heads=config.TRANSFORMER_HEADS,
             transformer_layers=2 if args.model == "end2end" else config.TRANSFORMER_LAYERS,
+            transformer_ff_dim=config.TRANSFORMER_FF_DIM,
+            dropout=config.TRANSFORMER_DROPOUT,
             use_stn=config.USE_STN,
             pretrained=False,
         )
@@ -156,11 +176,20 @@ def main():
     print(f"📦 Loading weights from: {weights_path}")
     checkpoint = torch.load(weights_path, map_location=device)
     if isinstance(checkpoint, dict) and "state_dict" in checkpoint:
-        model.load_state_dict(checkpoint["state_dict"])
+        state_dict = checkpoint["state_dict"]
     elif isinstance(checkpoint, dict) and "model" in checkpoint:
-        model.load_state_dict(checkpoint["model"])
+        state_dict = checkpoint["model"]
     else:
-        model.load_state_dict(checkpoint)
+        state_dict = checkpoint
+        
+    # Backward-compatible loading (e.g. checkpoints before res_scale_gate)
+    missing, unexpected = model.load_state_dict(state_dict, strict=False)
+    critical_missing = [k for k in missing if k != "sr_net.res_scale_gate"]
+    if critical_missing:
+        print(f"⚠️ WARNING: Missing {len(critical_missing)} keys during load: {critical_missing[:5]}...")
+    else:
+        matched = len(state_dict) - len(unexpected)
+        print(f"✅ Model weights loaded successfully ({matched} keys matched).")
         
     model = model.to(device)
     model.eval()
@@ -186,7 +215,11 @@ def main():
         for images, targets, target_lengths, labels_text, track_ids in tqdm(val_loader, desc="Evaluation"):
             images = images.to(device)
             preds = model(images)
-            decoded_list = decode_with_confidence(preds, config.IDX2CHAR)
+            decoded_list = decode_with_confidence(
+                preds,
+                config.IDX2CHAR,
+                use_format_prior=(not args.no_format_prior),
+            )
             
             for i, (pred_text, conf) in enumerate(decoded_list):
                 gt_text = labels_text[i]

@@ -52,8 +52,10 @@ class MultiFrameSRResTran(nn.Module):
         Returns:
             logits: [Batch, Seq_Len, Num_Classes]
         """
-        sr_trainable = any(p.requires_grad for p in self.sr_net.parameters())
-        if sr_trainable:
+        sr_conv_trainable = any(
+            p.requires_grad for n, p in self.sr_net.named_parameters() if n != "res_scale_gate"
+        )
+        if sr_conv_trainable or self.sr_net.res_scale_gate.requires_grad:
             sr_image = self.sr_net(x)
         else:
             with torch.no_grad():

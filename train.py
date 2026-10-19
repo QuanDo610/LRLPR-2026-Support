@@ -148,6 +148,11 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Hard execution time limit in hours. Automatically breaks and saves checkpoints if exceeded.",
     )
+    parser.add_argument(
+        "--use-hard-loss",
+        action="store_true",
+        help="Use HardCharacterCTCLoss instead of standard nn.CTCLoss",
+    )
     return parser.parse_args()
 
 
@@ -197,6 +202,11 @@ def main():
     if args.freeze_sr:
         config.FREEZE_SR = True
         
+    config.USE_HARD_LOSS = bool(args.use_hard_loss)
+    config.WARMSTART_OCR = bool(args.warmstart_ocr)
+    config.WARMSTART_SR = bool(args.warmstart_sr)
+    config.HAS_CHECKPOINT = bool(args.checkpoint)
+
     if args.dry_run:
         config.DRY_RUN = True
         config.EPOCHS = 1
@@ -340,7 +350,8 @@ def main():
             num_layers=config.SR_VIT_NUM_LAYERS,
             ff_dim=config.SR_VIT_FF_DIM,
             dropout=config.TRANSFORMER_DROPOUT,
-            max_seq_len=(sr_h // config.SR_VIT_PATCH_H) * (sr_w // config.SR_VIT_PATCH_W)
+            max_seq_len=(sr_h // config.SR_VIT_PATCH_H) * (sr_w // config.SR_VIT_PATCH_W),
+            use_stn=config.USE_STN,
         ).to(config.DEVICE)
     elif config.MODEL_TYPE == "sr_restran":
         from src.models.sr_restran import MultiFrameSRResTran
@@ -386,6 +397,7 @@ def main():
             sys.exit(1)
 
     # 2. Warmstart SR module
+    sr_loaded_ok = False
     if args.warmstart_sr:
         if os.path.exists(args.warmstart_sr):
             print(f"📦 Warm-starting SR module from {args.warmstart_sr}")
@@ -400,19 +412,26 @@ def main():
             
             target_sr = getattr(model, 'sr_net', None)
             if target_sr is not None:
-                # Handle old conv_first / conv_last mapping if applicable
+                target_sr_dict = target_sr.state_dict()
                 adapted_sr_state = {}
+                skipped_shapes = 0
                 for k, v in sr_sub_state.items():
                     new_k = k
                     if k.startswith("conv_first."):
                         new_k = k.replace("conv_first.", "head.")
                     elif k.startswith("conv_last."):
                         new_k = k.replace("conv_last.", "tail.")
-                    adapted_sr_state[new_k] = v
-                
-                missing, unexpected = target_sr.load_state_dict(adapted_sr_state, strict=False)
-                matched = len(adapted_sr_state) - len(unexpected)
-                print(f"   ✅ SR module weights loaded: {matched} keys matched into sr_net (missing: {len(missing)}, unexpected: {len(unexpected)})")
+                    if new_k in target_sr_dict:
+                        if v.shape == target_sr_dict[new_k].shape:
+                            adapted_sr_state[new_k] = v
+                        else:
+                            skipped_shapes += 1
+                if adapted_sr_state:
+                    missing, unexpected = target_sr.load_state_dict(adapted_sr_state, strict=False)
+                    sr_loaded_ok = len(adapted_sr_state) >= 10
+                    print(f"   ✅ SR module weights loaded: {len(adapted_sr_state)} keys matched (skipped {skipped_shapes} shape-mismatched keys)")
+                else:
+                    print(f"   ⚠️ WARNING: No compatible 3-channel SR weights found in {args.warmstart_sr} (skipped {skipped_shapes} incompatible keys).")
             else:
                 print(f"   ⚠️ Model {config.MODEL_TYPE} does not have a 'sr_net' submodule. Skipping SR warmstart.")
         else:
@@ -447,13 +466,23 @@ def main():
     # 4. Freeze SR module if requested (Bug 4 fix)
     if args.freeze_sr:
         if hasattr(model, 'sr_net'):
-            for p in model.sr_net.parameters():
-                p.requires_grad = False
+            for name, p in model.sr_net.named_parameters():
+                if name == "res_scale_gate":
+                    p.requires_grad = True
+                else:
+                    p.requires_grad = False
             model.sr_net.eval()
             config.FREEZE_SR = True
-            print("❄️ Super-Resolution Module FROZEN (requires_grad = False). Protecting SR filters from gradient distortion.")
+            print("❄️ Super-Resolution Module FROZEN (requires_grad = False, res_scale_gate trainable). Protecting SR filters from gradient distortion.")
         else:
             print(f"⚠️ Model {config.MODEL_TYPE} does not have 'sr_net'. --freeze-sr ignored.")
+
+    # Res scale gate protection for untrained SR with warmstart OCR
+    if args.warmstart_ocr and hasattr(model, 'sr_net'):
+        if not sr_loaded_ok and not args.checkpoint:
+            if hasattr(model.sr_net, 'res_scale_gate'):
+                model.sr_net.res_scale_gate.data.fill_(0.05)
+                print("   🛡️ Random-SR Protection: initialized res_scale_gate to 0.05 to preserve warmstart OCR accuracy at Epoch 0.")
 
     # Print model summary
     total_params = sum(p.numel() for p in model.parameters())

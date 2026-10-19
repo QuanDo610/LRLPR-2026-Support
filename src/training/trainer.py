@@ -44,25 +44,64 @@ class Trainer:
         
         # Loss and optimizer
         self.criterion = nn.CTCLoss(blank=0, zero_infinity=True, reduction='mean')
+        self.use_hard_loss: bool = getattr(config, 'USE_HARD_LOSS', False)
         self.hard_criterion = HardCharacterCTCLoss(
             char2idx=getattr(config, 'CHAR2IDX', {}),
             blank=0,
             alpha_hard=0.4,
             gamma_focal=0.5,
             margin=0.10,
-            lambda_margin=2.0,
+            lambda_margin=0.2,
         )
-        trainable_params = [p for p in model.parameters() if p.requires_grad]
+
+        # Build differential parameter groups (filtering out any empty groups for --freeze-sr safety)
+        base_lr = config.LEARNING_RATE
+        warmstart_ocr = getattr(config, 'WARMSTART_OCR', False)
+
+        stn_params: List[nn.Parameter] = []
+        sr_params: List[nn.Parameter] = []
+        ocr_params: List[nn.Parameter] = []
+
+        for name, param in model.named_parameters():
+            if not param.requires_grad:
+                continue
+            if 'stn.' in name:
+                stn_params.append(param)
+            elif name.startswith('sr_net.'):
+                sr_params.append(param)
+            else:
+                ocr_params.append(param)
+
+        param_groups = []
+        max_lrs = []
+        if sr_params:
+            param_groups.append({'params': sr_params, 'lr': base_lr})
+            max_lrs.append(base_lr)
+        if ocr_params:
+            ocr_lr = base_lr * 0.2 if (warmstart_ocr and hasattr(model, 'sr_net')) else base_lr
+            param_groups.append({'params': ocr_params, 'lr': ocr_lr})
+            max_lrs.append(ocr_lr)
+        if stn_params:
+            stn_lr = base_lr * 0.1
+            param_groups.append({'params': stn_params, 'lr': stn_lr})
+            max_lrs.append(stn_lr)
+
+        if not param_groups:
+            trainable_params = [p for p in model.parameters() if p.requires_grad]
+            param_groups = [{'params': trainable_params, 'lr': base_lr}]
+            max_lrs = [base_lr]
+
         self.optimizer = optim.AdamW(
-            trainable_params,
-            lr=config.LEARNING_RATE,
+            param_groups,
+            lr=base_lr,
             weight_decay=config.WEIGHT_DECAY
         )
         self.scheduler = optim.lr_scheduler.OneCycleLR(
             self.optimizer,
-            max_lr=config.LEARNING_RATE,
+            max_lr=max_lrs if len(max_lrs) > 1 else max_lrs[0],
             steps_per_epoch=len(train_loader),
-            epochs=config.EPOCHS
+            epochs=config.EPOCHS,
+            pct_start=0.1,
         )
         self.device_type: str = self.device.type if self.device.type in ['cuda', 'mps', 'cpu'] else 'cpu'
         self.autocast_enabled: bool = (self.device.type in ['cuda', 'mps'])
@@ -117,13 +156,28 @@ class Trainer:
                     fill_value=preds.size(1),
                     dtype=torch.long
                 )
-                loss = self.hard_criterion(
-                    log_probs,
-                    targets,
-                    input_lengths,
-                    target_lengths,
-                    head_weight=self._get_head_weight(),
-                )
+                if self.use_hard_loss:
+                    loss = self.hard_criterion(
+                        log_probs,
+                        targets,
+                        input_lengths,
+                        target_lengths,
+                        head_weight=self._get_head_weight(),
+                    )
+                elif self.device.type == 'mps':
+                    loss = self.criterion(
+                        log_probs.cpu(),
+                        targets.cpu(),
+                        input_lengths,
+                        target_lengths,
+                    ).to(self.device)
+                else:
+                    loss = self.criterion(
+                        log_probs,
+                        targets,
+                        input_lengths,
+                        target_lengths,
+                    )
 
             # NaN / Inf Loss Guard (Bug 2 Fix)
             if torch.isnan(loss) or torch.isinf(loss):
@@ -264,6 +318,18 @@ class Trainer:
         if max_hours:
             print(f"🛡️ HARD TIME GUARD ENABLED: Training will automatically terminate after {max_hours:.2f} hours to protect GPU quota.")
         
+        if self.val_loader is not None and (
+            getattr(self.config, 'WARMSTART_OCR', False)
+            or getattr(self.config, 'HAS_CHECKPOINT', False)
+        ):
+            init_metrics, init_sub = self.validate()
+            self.best_acc = init_metrics['acc']
+            print(f"📌 Epoch 0 (Warm-Start Baseline): Val Loss: {init_metrics['loss']:.4f} | Val Acc: {self.best_acc:.2f}%")
+            if self.best_acc > 0:
+                self.save_model()
+                if init_sub:
+                    self.save_submission(init_sub)
+
         for epoch in range(self.config.EPOCHS):
             self.current_epoch = epoch
             

@@ -73,6 +73,8 @@ class StackedSRNet(nn.Module):
         
         # Final reconstruction layer
         self.tail = nn.Conv2d(base_channels, 3, 3, padding=1, bias=True)
+        # Learnable residual scaling gate (1.0 for pretrained SR, 0.05 for random-SR warmstart)
+        self.res_scale_gate = nn.Parameter(torch.ones(1))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -96,8 +98,8 @@ class StackedSRNet(nn.Module):
         
         out = self.tail(self.upsample(res))
         
-        # Add base and clamp to [-1, 1] matching ALBUMENTATIONS
-        out = torch.clamp(out + base, -1.0, 1.0)
+        # Add gated SR residual to bicubic base and clamp to [-1, 1]
+        out = torch.clamp(base + self.res_scale_gate * out, -1.0, 1.0)
         
         if is_5d:
             _, C_out, H_out, W_out = out.size()

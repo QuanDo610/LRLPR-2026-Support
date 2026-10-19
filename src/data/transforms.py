@@ -20,6 +20,11 @@ def get_train_transforms(
     Uses additional_targets to apply identical geometric transformations across
     all frames of a track, strictly maintaining temporal coherence.
     """
+    hole_h_min = max(2, int(round(4 * img_height / 32)))
+    hole_h_max = max(4, int(round(8 * img_height / 32)))
+    hole_w_min = max(2, int(round(4 * img_width / 128)))
+    hole_w_max = max(4, int(round(8 * img_width / 128)))
+
     return A.Compose([
         A.Resize(height=img_height, width=img_width),
         A.Affine(
@@ -41,8 +46,8 @@ def get_train_transforms(
         A.ChannelShuffle(p=0.3),
         A.CoarseDropout(
             num_holes_range=(2, 5),
-            hole_height_range=(4, 8),
-            hole_width_range=(4, 8),
+            hole_height_range=(hole_h_min, hole_h_max),
+            hole_width_range=(hole_w_min, hole_w_max),
             p=0.3
         ),
         A.Normalize(mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5)),

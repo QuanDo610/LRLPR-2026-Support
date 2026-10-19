@@ -266,20 +266,25 @@ class MultiFrameDataset(Dataset):
         is_synthetic = item['is_synthetic']
         track_id = item['track_id']
         
+        # Standardize synthetic HR frames to canonical (32, 128) canvas before degradation
+        # so Downscale(0.3, 0.5) behaves identically for 16x64 (Flow 2/3) and 32x128 (Flow 1)
+        load_h = max(self.img_height, 32) if (is_synthetic and self.degrade) else self.img_height
+        load_w = max(self.img_width, 128) if (is_synthetic and self.degrade) else self.img_width
+
         # Load all frames for this track
         raw_images = []
         for p in img_paths:
             img = cv2.imread(p, cv2.IMREAD_COLOR)
             if img is None:
-                img = np.zeros((self.img_height, self.img_width, 3), dtype=np.uint8)
+                img = np.zeros((load_h, load_w, 3), dtype=np.uint8)
             else:
                 img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-                img = cv2.resize(img, (self.img_width, self.img_height))
+                img = cv2.resize(img, (load_w, load_h))
             raw_images.append(img)
 
         num_frames = len(raw_images)
         if num_frames == 0:
-            raw_images = [np.zeros((self.img_height, self.img_width, 3), dtype=np.uint8) for _ in range(5)]
+            raw_images = [np.zeros((load_h, load_w, 3), dtype=np.uint8) for _ in range(5)]
             num_frames = 5
 
         # 1. Apply degradation if synthetic (coherently across multi-frame if supported)
