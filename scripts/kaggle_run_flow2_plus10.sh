@@ -5,15 +5,11 @@ PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$PROJECT_ROOT"
 
 echo "=========================================================================="
-echo "🚀 Chuẩn bị và Đẩy Kaggle Kernel: Flow 2 Joint Training +10 Epochs (v15)"
+echo "🚀 Chuẩn bị và Đẩy Kaggle Kernel: Flow 2 Joint Training +10 Epochs (v15 Fast-Finder)"
 echo "=========================================================================="
 
-# 1. Sync updated codebase and best checkpoint to Kaggle Dataset
-echo "📦 Bước 1: Đồng bộ Codebase & Checkpoint 77.68% lên Kaggle Dataset..."
-bash scripts/kaggle_sync.sh
-
-# 2. Chuẩn bị Kernel Metadata & Template
-echo "📦 Bước 2: Tạo thư mục cấu hình kernel kaggle_push_kernel..."
+# Chuẩn bị Kernel Metadata & Template
+echo "📦 Bước 1: Tạo thư mục cấu hình kernel kaggle_push_kernel..."
 mkdir -p kaggle_push_kernel
 cd kaggle_push_kernel
 
@@ -41,7 +37,6 @@ cat << 'PY_EOF' > kaggle_kernel_template.py
 import os
 import sys
 import subprocess
-import glob
 import time
 
 # Chống nuốt log trên Kaggle
@@ -49,59 +44,68 @@ sys.stdout.reconfigure(line_buffering=True)
 os.environ["PYTHONUNBUFFERED"] = "1"
 
 print("=" * 70)
-print("🚀 KAGGLE GPU: FLOW 2 (SR-RESTRAN) FINE-TUNING +10 EPOCHS")
+print("🚀 KAGGLE GPU: FLOW 2 (SR-RESTRAN) FINE-TUNING +10 EPOCHS (FAST-FINDER)")
 print("=" * 70)
 
+def find_in_kaggle(target_name, is_dir=False, max_depth=3, base_dir="/kaggle/input"):
+    """Fast non-recursive pruned finder that never walks into deep 38,000 track folders."""
+    for root, dirs, files in os.walk(base_dir):
+        rel = os.path.relpath(root, base_dir)
+        depth = 0 if rel == "." else len(rel.split(os.sep))
+        if is_dir and target_name in dirs:
+            return os.path.join(root, target_name)
+        if not is_dir and target_name in files:
+            return os.path.join(root, target_name)
+        if depth >= max_depth:
+            dirs.clear()  # Prune deep directory recursion (avoids walking 190,000 files!)
+    return None
+
+t0 = time.time()
 print("\n📦 1. Khôi phục mã nguồn từ dataset...")
-zip_paths = glob.glob('/kaggle/input/**/codebase.zip', recursive=True)
-if zip_paths:
-    print(f"   Unzipping {zip_paths[0]} to /kaggle/working/...")
-    os.system(f"unzip -o -q {zip_paths[0]} -d /kaggle/working/")
+codebase_train_py = find_in_kaggle('train.py', is_dir=False, max_depth=3)
+if codebase_train_py:
+    codebase_root = os.path.dirname(codebase_train_py)
+    print(f"   ✅ Found codebase at: {codebase_root} in {time.time() - t0:.2f}s")
+    os.system(f"cp -rf {codebase_root}/* /kaggle/working/")
 else:
-    print("❌ Không tìm thấy codebase.zip! Thử tìm train.py...")
-    codebase_paths = glob.glob('/kaggle/input/**/train.py', recursive=True)
-    if codebase_paths:
-        codebase_dir = os.path.dirname(codebase_paths[0])
-        print(f"   Copy từ: {codebase_dir}")
-        os.system(f"cp -r {codebase_dir}/* /kaggle/working/")
-    else:
-        print("❌ LỖI NGHIÊM TRỌNG: Không tìm thấy mã nguồn!")
-        sys.exit(1)
+    print("❌ LỖI NGHIÊM TRỌNG: Không tìm thấy train.py trong /kaggle/input!")
+    sys.exit(1)
 
 os.system("mkdir -p /kaggle/working/data /kaggle/working/results")
 
 print("\n🔗 2. Liên kết dữ liệu huấn luyện và kiểm định...")
-kaggle_train_paths = glob.glob('/kaggle/input/**/train', recursive=True)
-if kaggle_train_paths:
-    train_dir = kaggle_train_paths[0]
+train_dir = find_in_kaggle('train', is_dir=True, max_depth=3)
+if train_dir:
     os.system(f"ln -sfn {train_dir} /kaggle/working/data/train")
     print(f"   ✅ Linked train data: {train_dir} -> /kaggle/working/data/train")
 else:
     print("❌ LỖI: Không tìm thấy thư mục train trong /kaggle/input!")
     sys.exit(1)
 
-kaggle_test_paths = glob.glob('/kaggle/input/**/public_test', recursive=True) or glob.glob('/kaggle/input/**/*test*', recursive=True)
-if kaggle_test_paths:
-    test_dir = kaggle_test_paths[0]
+test_dir = find_in_kaggle('public_test', is_dir=True, max_depth=3)
+if test_dir:
     os.system(f"ln -sfn {test_dir} /kaggle/working/data/public_test")
     print(f"   ✅ Linked test data: {test_dir} -> /kaggle/working/data/public_test")
 
-val_track_paths = glob.glob('/kaggle/input/**/val_tracks.json', recursive=True)
-if val_track_paths:
-    os.system(f"cp {val_track_paths[0]} /kaggle/working/data/val_tracks.json")
-    print(f"   ✅ Copied val_tracks.json: {val_track_paths[0]}")
+val_tracks_path = find_in_kaggle('val_tracks.json', is_dir=False, max_depth=3)
+if val_tracks_path:
+    os.system(f"cp {val_tracks_path} /kaggle/working/data/val_tracks.json")
+    print(f"   ✅ Copied val_tracks.json: {val_tracks_path}")
 
-# Tìm checkpoint 77.68%
-ckpt_paths = glob.glob('/kaggle/input/**/sr_restran_flow2_plus10_best.pth', recursive=True)
 target_ckpt = "/kaggle/working/results/sr_restran_flow2_plus10_best.pth"
-if ckpt_paths:
-    os.system(f"cp {ckpt_paths[0]} {target_ckpt}")
-    print(f"   ✅ Checkpoint 77.68% copied from: {ckpt_paths[0]}")
-elif os.path.exists(target_ckpt):
-    print(f"   ✅ Checkpoint 77.68% already present at {target_ckpt}")
+if not os.path.exists(target_ckpt):
+    found_ckpt = find_in_kaggle('sr_restran_flow2_plus10_best.pth', is_dir=False, max_depth=4)
+    if found_ckpt:
+        os.system(f"cp {found_ckpt} {target_ckpt}")
+        print(f"   ✅ Checkpoint copied from: {found_ckpt}")
+
+if os.path.exists(target_ckpt):
+    print(f"   ✅ Checkpoint verified ({os.path.getsize(target_ckpt):,} bytes) at {target_ckpt}")
 else:
-    print("⚠️ Không tìm thấy checkpoint sr_restran_flow2_plus10_best.pth! Quét thư mục results...")
-    os.system("find /kaggle/input -name '*.pth' -exec ls -lh {} \;")
+    print(f"❌ LỖI: Không tìm thấy checkpoint {target_ckpt}!")
+    sys.exit(1)
+
+print(f"⚡ Toàn bộ bước chuẩn bị hoàn tất trong {time.time() - t0:.2f} giây!")
 
 print("\n📦 3. Cài đặt thư viện phụ thuộc...")
 os.system("pip install -q albumentations")
@@ -119,7 +123,7 @@ train_cmd = [
     "--ocr-lr-scale", "0.8",
     "--batch-size", "64",
     "--num-workers", "2",
-    "--max-hours", "2.0",
+    "--max-hours", "4.0",
     "--require-gpu"
 ]
 
