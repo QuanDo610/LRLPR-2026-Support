@@ -1,6 +1,7 @@
 """Evaluation script for calculating detailed metrics (Accuracy, CER, F1-Score, Character Error Analysis) on validation dataset."""
 import argparse
 import json
+import math
 import os
 import sys
 from collections import Counter, defaultdict
@@ -77,6 +78,11 @@ def parse_args():
         "--no-format-prior",
         action="store_true",
         help="Disable 7-character plate format grammar constraint in decoding",
+    )
+    parser.add_argument(
+        "--no-tta",
+        action="store_true",
+        help="Disable contrast-aware test-time augmentation (TTA) in evaluation",
     )
     return parser.parse_args()
 
@@ -233,7 +239,16 @@ def main():
     with torch.no_grad():
         for images, targets, target_lengths, labels_text, track_ids in tqdm(val_loader, desc="Evaluation"):
             images = images.to(device)
-            preds = model(images)
+            preds_orig = model(images)
+            if not args.no_tta:
+                images_sharp = torch.clamp(images * 1.08, -1.0, 1.0)
+                preds_sharp = model(images_sharp)
+                preds = torch.logsumexp(
+                    torch.stack([preds_orig + math.log(0.70), preds_sharp + math.log(0.30)], dim=0),
+                    dim=0,
+                )
+            else:
+                preds = preds_orig
             decoded_list = decode_with_confidence(
                 preds,
                 config.IDX2CHAR,

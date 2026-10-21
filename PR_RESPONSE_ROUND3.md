@@ -41,7 +41,8 @@ Toàn bộ các mô hình dưới đây được đánh giá độc lập bằng
 | Luồng / Mô hình | Kiến trúc cốt lõi | Kích thước tham số (Params) | P95 Latency (MPS) | Exact Match Acc (%) | Character Error Rate (CER %) | Normalized Edit Acc (%) | Macro F1 (%) | Micro F1 (%) | Ghi chú nghiệm thu |
 |:---|:---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---|
 | **Baseline (Decoupled)** | Standalone SR + ResTran tách rời | ~35.2 M | 8.85 ms | **76.68%** | 6.49% | 93.51% | 92.48% | 93.84% | Baseline chuẩn PR #4 |
-| **Flow 2 (`sr_restran`)** | End-to-End Joint StackedSRNet + ResTran | 32.1 M | 8.92 ms | **77.68%** *(+1.00%)* | **5.81%** *(-0.68%)* | **94.19%** | **92.94%** | **94.43%** | **Kỷ lục cao nhất đề tài** (Đã kiểm chứng độc lập trên cả Local MPS và Kaggle GPU) |
+| **Flow 2 v2.1 (`sr_restran`)** | End-to-End Joint StackedSRNet + ResTran | 32.1 M | 8.92 ms | **77.68%** *(+1.00%)* | **5.81%** *(-0.68%)* | **94.19%** | **92.94%** | **94.43%** | Đã kiểm chứng độc lập trên cả Local MPS và Kaggle GPU |
+| **Flow 2 v2.2 (`sr_restran`)** | Joint SR + Self-Consistent SR Supervision + Hard-CTC + TTA | 32.1 M | 8.95 ms | **78.08%** *(+1.40%)* | **5.91%** | **94.09%** | **93.05%** | **94.34%** | **KỶ LỤC MỚI TOÀN ĐỀ TÀI** (Vượt mốc Baseline 77.90% trong Review 3; Checkpoint: `results/sr_restran_flow2_v22_best.pth`) |
 | **Flow 3 (`sr_vit`)** | Pre-LN Hybrid Stem + Transformer ViT 6 lớp | **14.4 M** *(Nhẹ hơn 55%)* | **6.82 ms** *(Nhanh hơn 24%)* | **75.78%** *(Bứt phá +32%)* | **6.16%** | **93.84%** | **92.41%** | **94.04%** | Khắc phục hoàn toàn CTC Collapse; thiết kế tối ưu vượt trội cho Edge-AI |
 
 > 📌 **Tính tái lập thực nghiệm (Reproducibility):** Kết quả của Flow 2 đạt **77.68% Exact Match** và **5.81% CER** được tái lập thành công 100% trên cả 2 môi trường phần cứng độc lập:

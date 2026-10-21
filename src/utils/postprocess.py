@@ -1,6 +1,6 @@
 """Post-processing utilities for OCR decoding with FP32 Grammar-Constrained Logit Calibration."""
 from itertools import groupby
-from typing import Dict, List, Tuple
+from typing import Dict, List, Set, Tuple
 
 import numpy as np
 import torch
@@ -32,6 +32,85 @@ LETTER_TO_DIGIT_HOMOGLYPHS: Dict[str, str] = {
     'T': '7',
     'B': '8',
 }
+
+
+def _beam_search_7char_fallback(
+    sample_log_probs: np.ndarray,
+    idx2char: Dict[int, str],
+    letter_indices_set: set,
+    digit_indices_set: set,
+    beam_width: int = 5,
+) -> Tuple[str, float]:
+    """Prefix Beam Search fallback to recover valid 7-character plates when greedy length != 7."""
+    T, _ = sample_log_probs.shape
+    beams: Dict[Tuple[int, ...], Tuple[float, float]] = {(): (0.0, -np.inf)}
+
+    for t in range(T):
+        next_beams: Dict[Tuple[int, ...], Tuple[float, float]] = {}
+        top_c = np.argsort(sample_log_probs[t])[-5:][::-1]
+        lp_blank = float(sample_log_probs[t, 0])
+
+        for prefix, (p_b, p_nb) in beams.items():
+            p_total = float(np.logaddexp(p_b, p_nb))
+            nb_b, nb_nb = next_beams.get(prefix, (-np.inf, -np.inf))
+            next_beams[prefix] = (float(np.logaddexp(nb_b, p_total + lp_blank)), nb_nb)
+
+            for c in top_c:
+                c_int = int(c)
+                if c_int == 0:
+                    continue
+                lp_c = float(sample_log_probs[t, c_int])
+                pos = len(prefix)
+                grammar_bonus = 0.0
+                if pos in (0, 1, 2) and c_int not in letter_indices_set:
+                    grammar_bonus = -1.5
+                elif pos in (3, 5, 6) and c_int not in digit_indices_set:
+                    grammar_bonus = -1.5
+
+                if pos > 0 and prefix[-1] == c_int:
+                    ob_b, ob_nb = next_beams.get(prefix, (-np.inf, -np.inf))
+                    next_beams[prefix] = (ob_b, float(np.logaddexp(ob_nb, p_nb + lp_c)))
+                    if pos < 7:
+                        new_p = prefix + (c_int,)
+                        nb2_b, nb2_nb = next_beams.get(new_p, (-np.inf, -np.inf))
+                        next_beams[new_p] = (nb2_b, float(np.logaddexp(nb2_nb, p_b + lp_c + grammar_bonus)))
+                elif pos < 7:
+                    new_p = prefix + (c_int,)
+                    nb2_b, nb2_nb = next_beams.get(new_p, (-np.inf, -np.inf))
+                    next_beams[new_p] = (nb2_b, float(np.logaddexp(nb2_nb, p_total + lp_c + grammar_bonus)))
+
+        sorted_beams = sorted(
+            next_beams.items(),
+            key=lambda kv: float(np.logaddexp(kv[1][0], kv[1][1])),
+            reverse=True,
+        )[:beam_width * 2]
+        beams = dict(sorted_beams)
+
+    best_7 = None
+    best_7_score = -np.inf
+    for prefix, (p_b, p_nb) in beams.items():
+        score = float(np.logaddexp(p_b, p_nb))
+        if len(prefix) == 7 and score > best_7_score:
+            best_7 = prefix
+            best_7_score = score
+
+    if best_7 is None:
+        return "", 0.0
+
+    chars: List[str] = []
+    for pos_idx, c_idx in enumerate(best_7):
+        ch = idx2char.get(c_idx, "")
+        if pos_idx in (0, 1, 2) and not ch.isalpha():
+            h_list = DIGIT_TO_LETTER_HOMOGLYPHS.get(ch, [])
+            if h_list:
+                ch = h_list[0]
+        elif pos_idx in (3, 5, 6) and not ch.isdigit():
+            h_d = LETTER_TO_DIGIT_HOMOGLYPHS.get(ch)
+            if h_d:
+                ch = h_d
+        chars.append(ch)
+
+    return "".join(chars), float(np.clip(np.exp(best_7_score / max(1, T)), 0.0, 1.0))
 
 
 def decode_with_confidence(
@@ -84,6 +163,18 @@ def decode_with_confidence(
         confidences: List[float] = []
 
         apply_grammar = use_format_prior and (len(segments) == 7) and bool(letter_indices) and bool(digit_indices)
+
+        if use_format_prior and len(segments) != 7 and bool(letter_indices) and bool(digit_indices):
+            fb_str, fb_conf = _beam_search_7char_fallback(
+                sample_log_probs=sample_log_probs,
+                idx2char=idx2char,
+                letter_indices_set=set(letter_indices),
+                digit_indices_set=set(digit_indices),
+                beam_width=5,
+            )
+            if len(fb_str) == 7:
+                results.append((fb_str, fb_conf))
+                continue
 
         for pos_idx, (char_idx, t_start, t_end, seg_lp) in enumerate(segments):
             raw_char = idx2char.get(char_idx, '')
@@ -147,6 +238,6 @@ class CTCDecoder:
         self.idx2char = idx2char
         self.blank_idx = blank_idx
 
-    def decode_batch(self, preds: torch.Tensor, use_format_prior: bool = False) -> List[str]:
+    def decode_batch(self, preds: torch.Tensor, use_format_prior: bool = True) -> List[str]:
         results = decode_with_confidence(preds, self.idx2char, use_format_prior=use_format_prior)
         return [text for text, _ in results]

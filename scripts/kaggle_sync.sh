@@ -25,6 +25,7 @@ if [ -d "results" ]; then
     mkdir -p "$TMP_DIR/source/results"
     cp results/sr_net_best.pth "$TMP_DIR/source/results/" 2>/dev/null || true
     cp results/sr_restran_flow2_plus10_best.pth "$TMP_DIR/source/results/" 2>/dev/null || true
+    cp results/sr_vit_flow3_best.pth "$TMP_DIR/source/results/" 2>/dev/null || true
 fi
 
 # Zip toàn bộ thư mục source thành codebase.zip (Để Kaggle auto-unzip giữ nguyên cấu trúc)

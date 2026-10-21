@@ -159,6 +159,12 @@ def parse_args() -> argparse.Namespace:
         default=1.0,
         help="Scale multiplier for OCR parameter learning rate (default: 1.0)",
     )
+    parser.add_argument(
+        "--val-split-file",
+        type=str,
+        default=None,
+        help="Path to validation tracks JSON file",
+    )
     return parser.parse_args()
 
 
@@ -177,6 +183,7 @@ def main():
         'batch_size': 'BATCH_SIZE',
         'learning_rate': 'LEARNING_RATE',
         'data_root': 'DATA_ROOT',
+        'val_split_file': 'VAL_SPLIT_FILE',
         'seed': 'SEED',
         'num_workers': 'NUM_WORKERS',
         'hidden_size': 'HIDDEN_SIZE',
@@ -490,6 +497,26 @@ def main():
                 missing, unexpected = target_ocr.load_state_dict(ocr_sub_state, strict=False)
                 matched = len(ocr_sub_state) - len(unexpected)
                 print(f"   ✅ OCR module weights loaded: {matched} keys matched into ocr_net (missing: {len(missing)})")
+            elif hasattr(model, 'conv_stem'):
+                # Target is MultiFrameSRViT: map ResNet34 conv1..layer3 into conv_stem.0..6
+                stem_map = {
+                    "backbone.conv1.": "conv_stem.0.",
+                    "backbone.bn1.": "conv_stem.1.",
+                    "backbone.layer1.": "conv_stem.4.",
+                    "backbone.layer2.": "conv_stem.5.",
+                    "backbone.layer3.": "conv_stem.6.",
+                    "stn.": "stn.",
+                }
+                mapped_state = {}
+                for k, v in ocr_state.items():
+                    clean_k = k[len("ocr_net."):] if k.startswith("ocr_net.") else k
+                    for src_prefix, dst_prefix in stem_map.items():
+                        if clean_k.startswith(src_prefix):
+                            mapped_state[dst_prefix + clean_k[len(src_prefix):]] = v
+                            break
+                missing, unexpected = model.load_state_dict(mapped_state, strict=False)
+                matched = len(mapped_state) - len(unexpected)
+                print(f"   ✅ Mapped {matched} ResNet-34 stem/STN keys into MultiFrameSRViT (missing: {len(missing)})")
             else:
                 # Target is root model (e.g. ResTranOCR)
                 missing, unexpected = model.load_state_dict(ocr_state, strict=False)

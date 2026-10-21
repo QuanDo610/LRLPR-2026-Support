@@ -121,6 +121,8 @@ train_cmd = [
     "--epochs", "10",
     "--lr", "1.0e-4",
     "--ocr-lr-scale", "0.8",
+    "--aug-level", "light",
+    "--use-hard-loss",
     "--batch-size", "64",
     "--num-workers", "2",
     "--max-hours", "4.0",

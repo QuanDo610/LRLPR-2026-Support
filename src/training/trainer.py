@@ -48,10 +48,10 @@ class Trainer:
         self.hard_criterion = HardCharacterCTCLoss(
             char2idx=getattr(config, 'CHAR2IDX', {}),
             blank=0,
-            alpha_hard=0.4,
+            alpha_hard=0.5,
             gamma_focal=0.5,
             margin=0.10,
-            lambda_margin=0.2,
+            lambda_margin=2.0,
         )
 
         # Build differential parameter groups (filtering out any empty groups for --freeze-sr safety)
@@ -107,12 +107,16 @@ class Trainer:
             lr=base_lr,
             weight_decay=config.WEIGHT_DECAY
         )
+        total_steps = max(1, len(train_loader) * config.EPOCHS)
+        pct_start = max(0.05 if has_checkpoint else 0.10, 2.0 / max(4, total_steps))
         self.scheduler = optim.lr_scheduler.OneCycleLR(
             self.optimizer,
             max_lr=max_lrs if len(max_lrs) > 1 else max_lrs[0],
-            steps_per_epoch=len(train_loader),
+            steps_per_epoch=max(1, len(train_loader)),
             epochs=config.EPOCHS,
-            pct_start=0.1,
+            pct_start=pct_start,
+            div_factor=10.0 if has_checkpoint else 25.0,
+            final_div_factor=100.0 if has_checkpoint else 10000.0,
         )
         self.device_type: str = self.device.type if self.device.type in ['cuda', 'mps', 'cpu'] else 'cpu'
         self.autocast_enabled: bool = (self.device.type in ['cuda', 'mps'])
@@ -157,8 +161,18 @@ class Trainer:
             
             self.optimizer.zero_grad(set_to_none=True)
             
+            sr_trainable = (
+                hasattr(self.model, 'sr_net')
+                and not getattr(self.config, 'FREEZE_SR', False)
+                and any(p.requires_grad for n, p in self.model.sr_net.named_parameters() if n != 'res_scale_gate')
+            )
             with autocast(device_type=self.device_type, enabled=self.autocast_enabled):
-                preds = self.model(images)
+                if sr_trainable:
+                    preds, sr_images = self.model(images, return_sr=True)
+                else:
+                    preds = self.model(images)
+                    sr_images = None
+
                 preds_permuted = preds.permute(1, 0, 2)
                 # CRITICAL FIX (Bug 2): CTC loss computation in Float32 with clamping to avoid FP16 underflow -> NaN
                 log_probs = torch.clamp(preds_permuted.float(), min=-50.0, max=0.0)
@@ -168,7 +182,7 @@ class Trainer:
                     dtype=torch.long
                 )
                 if self.use_hard_loss:
-                    loss = self.hard_criterion(
+                    loss_ctc = self.hard_criterion(
                         log_probs,
                         targets,
                         input_lengths,
@@ -176,19 +190,36 @@ class Trainer:
                         head_weight=self._get_head_weight(),
                     )
                 elif self.device.type == 'mps':
-                    loss = self.criterion(
+                    loss_ctc = self.criterion(
                         log_probs.cpu(),
                         targets.cpu(),
                         input_lengths,
                         target_lengths,
                     ).to(self.device)
                 else:
-                    loss = self.criterion(
+                    loss_ctc = self.criterion(
                         log_probs,
                         targets,
                         input_lengths,
                         target_lengths,
                     )
+
+                if sr_images is not None:
+                    # Self-Consistent LR-Downprojection Supervision + Total Variation Regularization (Review 3 Bug #4 Fix)
+                    b_sz, f_sz, c_sz, h_sr, w_sr = sr_images.shape
+                    sr_flat = sr_images.float().view(b_sz * f_sz, c_sz, h_sr, w_sr)
+                    lr_flat = images.float().view(b_sz * f_sz, c_sz, images.size(3), images.size(4))
+                    sr_down = torch.nn.functional.interpolate(
+                        sr_flat, size=(images.size(3), images.size(4)), mode='area'
+                    )
+                    loss_lr_consist = torch.nn.functional.l1_loss(sr_down, lr_flat)
+                    loss_tv = (
+                        torch.mean(torch.abs(sr_flat[:, :, :, 1:] - sr_flat[:, :, :, :-1]))
+                        + torch.mean(torch.abs(sr_flat[:, :, 1:, :] - sr_flat[:, :, :-1, :]))
+                    )
+                    loss = loss_ctc + 0.20 * loss_lr_consist + 0.01 * loss_tv
+                else:
+                    loss = loss_ctc
 
             # NaN / Inf Loss Guard (Bug 2 Fix)
             if torch.isnan(loss) or torch.isinf(loss):
