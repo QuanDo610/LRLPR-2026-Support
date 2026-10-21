@@ -33,6 +33,25 @@ LETTER_TO_DIGIT_HOMOGLYPHS: Dict[str, str] = {
     'B': '8',
 }
 
+VALID_MERCOSUR_POS4_LETTERS = frozenset("ABCDEFGHIJ")
+
+# Empirical log P(letter | pos) for Positions 0 and 1 computed strictly on 9,001 Scenario-B TRAINING tracks (Slide 22)
+POS0_LETTER_LOG_PRIOR: Dict[str, float] = {
+    'A': -1.54, 'B': -1.47, 'C': -5.37, 'D': -5.12, 'E': -3.96, 'F': -3.52,
+    'G': -4.09, 'H': -5.55, 'I': -4.05, 'J': -5.14, 'K': -5.61, 'L': -5.35,
+    'M': -4.03, 'N': -5.42, 'O': -4.85, 'P': -3.66, 'Q': -2.69, 'R': -2.27,
+    'S': -2.28, 'T': -2.23, 'U': -5.50, 'V': -9.11, 'W': -9.11, 'X': -9.11,
+    'Y': -9.11, 'Z': -9.11,
+}
+
+POS1_LETTER_LOG_PRIOR: Dict[str, float] = {
+    'A': -2.46, 'B': -2.30, 'C': -2.70, 'D': -2.52, 'E': -2.30, 'F': -3.24,
+    'G': -4.70, 'H': -2.78, 'I': -3.87, 'J': -3.98, 'K': -4.20, 'L': -4.03,
+    'M': -4.02, 'N': -4.00, 'O': -4.01, 'P': -4.02, 'Q': -3.94, 'R': -4.05,
+    'S': -4.09, 'T': -3.49, 'U': -3.43, 'V': -3.44, 'W': -3.50, 'X': -3.13,
+    'Y': -3.08, 'Z': -3.18,
+}
+
 
 def _beam_search_7char_fallback(
     sample_log_probs: np.ndarray,
@@ -66,6 +85,8 @@ def _beam_search_7char_fallback(
                     grammar_bonus = -1.5
                 elif pos in (3, 5, 6) and c_int not in digit_indices_set:
                     grammar_bonus = -1.5
+                elif pos == 4 and c_int in letter_indices_set and idx2char.get(c_int) not in VALID_MERCOSUR_POS4_LETTERS:
+                    grammar_bonus = -2.0
 
                 if pos > 0 and prefix[-1] == c_int:
                     ob_b, ob_nb = next_beams.get(prefix, (-np.inf, -np.inf))
@@ -105,6 +126,10 @@ def _beam_search_7char_fallback(
             if h_list:
                 ch = h_list[0]
         elif pos_idx in (3, 5, 6) and not ch.isdigit():
+            h_d = LETTER_TO_DIGIT_HOMOGLYPHS.get(ch)
+            if h_d:
+                ch = h_d
+        elif pos_idx == 4 and ch.isalpha() and ch not in VALID_MERCOSUR_POS4_LETTERS:
             h_d = LETTER_TO_DIGIT_HOMOGLYPHS.get(ch)
             if h_d:
                 ch = h_d
@@ -182,23 +207,30 @@ def decode_with_confidence(
             chosen_lp = seg_lp
 
             if apply_grammar:
-                # Positions 0, 1, 2 must be Letters (A-Z)
-                if pos_idx in (0, 1, 2) and not raw_char.isalpha():
-                    seg_matrix = sample_log_probs[t_start:t_end, :][:, letter_indices]
-                    best_local_idx = int(np.argmax( np.max(seg_matrix, axis=0) ))
-                    best_letter_idx = letter_indices[best_local_idx]
-                    best_letter_lp = float(np.max(sample_log_probs[t_start:t_end, best_letter_idx]))
+                # Positions 0, 1, 2 must be Letters (A-Z) with Slide-22 Bayesian log-priors
+                if pos_idx in (0, 1, 2):
+                    prior_map = POS0_LETTER_LOG_PRIOR if pos_idx == 0 else (POS1_LETTER_LOG_PRIOR if pos_idx == 1 else {})
+                    alpha_p = 0.25 if pos_idx == 0 else (0.15 if pos_idx == 1 else 0.0)
+                    seg_max_lp = np.max(sample_log_probs[t_start:t_end, :], axis=0)
+                    best_letter_idx = char_idx if raw_char.isalpha() else letter_indices[0]
+                    best_score = -1e9
+                    for l_idx in letter_indices:
+                        l_char = idx2char[l_idx]
+                        score = float(seg_max_lp[l_idx]) + alpha_p * prior_map.get(l_char, -3.25)
+                        if score > best_score:
+                            best_score = score
+                            best_letter_idx = l_idx
+                    best_letter_lp = float(seg_max_lp[best_letter_idx])
 
-                    # Check visual homoglyph candidates in log-prob space
-                    homoglyphs = DIGIT_TO_LETTER_HOMOGLYPHS.get(raw_char, [])
-                    for h_char in homoglyphs:
-                        h_idx = char2idx.get(h_char)
-                        if h_idx is not None:
-                            h_lp = float(np.max(sample_log_probs[t_start:t_end, h_idx]))
-                            # Boost homoglyph slightly (+1.5 nats) if logit was saturated on the digit
-                            if h_lp + 1.5 > best_letter_lp:
-                                best_letter_idx = h_idx
-                                best_letter_lp = h_lp
+                    if not raw_char.isalpha():
+                        homoglyphs = DIGIT_TO_LETTER_HOMOGLYPHS.get(raw_char, [])
+                        for h_char in homoglyphs:
+                            h_idx = char2idx.get(h_char)
+                            if h_idx is not None:
+                                h_lp = float(seg_max_lp[h_idx])
+                                if h_lp + 1.5 > best_letter_lp:
+                                    best_letter_idx = h_idx
+                                    best_letter_lp = h_lp
 
                     chosen_char = idx2char.get(best_letter_idx, raw_char)
                     chosen_lp = best_letter_lp
@@ -222,11 +254,35 @@ def decode_with_confidence(
                     chosen_char = idx2char.get(best_digit_idx, raw_char)
                     chosen_lp = best_digit_lp
 
+                # Position 4: Mercosur hard constraint (Digits 0-9 or Letters A-J only, K-Z strictly forbidden)
+                elif pos_idx == 4 and raw_char.isalpha() and raw_char not in VALID_MERCOSUR_POS4_LETTERS:
+                    seg_max_lp = np.max(sample_log_probs[t_start:t_end, :], axis=0)
+                    valid_pos4_indices = digit_indices + [
+                        idx for idx in letter_indices if idx2char[idx] in VALID_MERCOSUR_POS4_LETTERS
+                    ]
+                    best_p4_idx = max(valid_pos4_indices, key=lambda idx: float(seg_max_lp[idx]))
+                    best_p4_lp = float(seg_max_lp[best_p4_idx])
+
+                    h_digit = LETTER_TO_DIGIT_HOMOGLYPHS.get(raw_char)
+                    if h_digit is not None:
+                        h_idx = char2idx.get(h_digit)
+                        if h_idx is not None:
+                            h_lp = float(seg_max_lp[h_idx])
+                            if h_lp + 1.5 > best_p4_lp:
+                                best_p4_idx = h_idx
+                                best_p4_lp = h_lp
+
+                    chosen_char = idx2char.get(best_p4_idx, raw_char)
+                    chosen_lp = best_p4_lp
+
             pred_chars.append(chosen_char)
             confidences.append(float(np.clip(np.exp(chosen_lp), 0.0, 1.0)))
 
         pred_str = "".join(pred_chars)
-        confidence = float(np.mean(confidences)) if confidences else 0.0
+        if confidences:
+            confidence = float(0.5 * np.mean(confidences) + 0.5 * np.min(confidences))
+        else:
+            confidence = 0.0
         results.append((pred_str, confidence))
 
     return results
