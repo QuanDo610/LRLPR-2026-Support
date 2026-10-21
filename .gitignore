@@ -214,6 +214,7 @@ __marimo__/
 *.pdf
 /results/
 /kaggle_results/
+kaggle_results*/
 /kaggle_kernel/
 /experiments/
 *.pth
