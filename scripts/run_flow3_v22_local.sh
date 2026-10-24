@@ -12,7 +12,7 @@ echo "🚀 Khởi chạy Huấn luyện Flow 3 v2.2 (MultiFrameSRViT) 12 Epochs 
 echo "=========================================================================="
 export PYTHONUNBUFFERED=1
 
-nohup "$PROJECT_ROOT/.venv/bin/python" train.py \
+nohup caffeinate -dimsu "$PROJECT_ROOT/.venv/bin/python" train.py \
   -m sr_vit \
   --checkpoint results/sr_vit_flow3_best.pth \
   --experiment-name sr_vit_flow3_v22 \

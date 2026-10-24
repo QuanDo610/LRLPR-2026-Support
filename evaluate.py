@@ -20,7 +20,11 @@ from src.models.restran import ResTranOCR
 from src.models.sr_restran import MultiFrameSRResTran
 from src.models.sr_vit import MultiFrameSRViT
 from src.utils.common import seed_everything
-from src.utils.postprocess import decode_with_confidence
+from src.utils.postprocess import (
+    decode_with_confidence,
+    extract_7slot_ctc_tensor,
+    slots_to_canonical_ctc,
+)
 
 
 def levenshtein_distance(s1: str, s2: str) -> int:
@@ -173,7 +177,7 @@ def load_any_lpr_model(
             pretrained=False,
         )
     else:
-        arch = default_arch
+        arch = "crnn"
         model = MultiFrameCRNN(
             num_classes=config.NUM_CLASSES,
             hidden_size=config.HIDDEN_SIZE,
@@ -197,37 +201,71 @@ def load_any_lpr_model(
     return model, arch
 
 
+def _unsharp_mask_batch(x: torch.Tensor, amount: float = 0.25) -> torch.Tensor:
+    B, F_c, C, H, W = x.shape
+    flat = x.view(B * F_c, C, H, W)
+    blurred = F.avg_pool2d(F.pad(flat, (1, 1, 1, 1), mode="replicate"), kernel_size=3, stride=1)
+    return torch.clamp(flat + amount * (flat - blurred), -1.0, 1.0).view(B, F_c, C, H, W)
+
+
 def model_forward_with_tta(
     model: torch.nn.Module,
     arch: str,
     images: torch.Tensor,
     use_tta: bool = True,
+    images_32: torch.Tensor = None,
 ) -> torch.Tensor:
-    """Runs model forward pass with optional 3-view Contrast TTA and resolution adaptation."""
+    """Runs model forward pass with 4-view Contrast + Unsharp-Mask TTA and native 32x128 resolution routing."""
     B, F_cnt, C, H, W = images.shape
-    if arch == "restran" and (H == 16 and W == 64):
-        in_imgs = F.interpolate(
-            images.view(-1, C, H, W),
-            size=(32, 128),
-            mode="bilinear",
-            align_corners=False,
-        ).view(B, F_cnt, C, 32, 128)
+    if arch in ("restran", "crnn"):
+        if images_32 is not None:
+            in_imgs = images_32
+        elif H == 16 and W == 64:
+            in_imgs = F.interpolate(
+                images.view(-1, C, H, W),
+                size=(32, 128),
+                mode="bilinear",
+                align_corners=False,
+            ).view(B, F_cnt, C, 32, 128)
+        else:
+            in_imgs = images
     else:
         in_imgs = images
 
     if not use_tta:
         return model(in_imgs)
 
-    # 3-view Contrast TTA: 1.0x (0.60), 1.08x (0.25), 0.92x (0.15)
     preds_orig = model(in_imgs)
     preds_sharp = model(torch.clamp(in_imgs * 1.08, -1.0, 1.0))
     preds_soft = model(torch.clamp(in_imgs * 0.92, -1.0, 1.0))
+    preds_unsharp = model(_unsharp_mask_batch(in_imgs, amount=0.25))
+
+    if arch == "sr_vit" and F_cnt >= 5:
+        # Multi-Anchor Temporal TTA: let Frame 1 and Frame 3 also act as the center query frame
+        preds_f1 = model(in_imgs[:, [0, 2, 1, 3, 4], :, :, :])
+        preds_f3 = model(in_imgs[:, [0, 1, 3, 2, 4], :, :, :])
+        return torch.logsumexp(
+            torch.stack(
+                [
+                    preds_orig + math.log(0.40),
+                    preds_sharp + math.log(0.18),
+                    preds_soft + math.log(0.12),
+                    preds_unsharp + math.log(0.14),
+                    preds_f1 + math.log(0.08),
+                    preds_f3 + math.log(0.08),
+                ],
+                dim=0,
+            ),
+            dim=0,
+        )
+
     return torch.logsumexp(
         torch.stack(
             [
-                preds_orig + math.log(0.60),
-                preds_sharp + math.log(0.25),
+                preds_orig + math.log(0.50),
+                preds_sharp + math.log(0.20),
                 preds_soft + math.log(0.15),
+                preds_unsharp + math.log(0.15),
             ],
             dim=0,
         ),
@@ -269,37 +307,54 @@ def main():
             )
             ensemble_models.append((aux_m, aux_arch))
 
-    # 3. Determine input resolution and load validation dataset
-    has_sr_pipeline = (
-        primary_arch in ["sr_restran", "sr_vit", "end2end"]
-        or any(a in ["sr_restran", "sr_vit", "end2end"] for _, a in ensemble_models)
-    )
-    in_h = 16 if has_sr_pipeline else config.IMG_HEIGHT
-    in_w = 64 if has_sr_pipeline else config.IMG_WIDTH
+    # 3. Determine input resolution requirements
+    all_archs = [primary_arch] + [a for _, a in ensemble_models]
+    needs_16 = any(a in ("sr_restran", "sr_vit", "end2end") for a in all_archs)
+    needs_32 = any(a in ("restran", "crnn") for a in all_archs)
 
-    val_ds = MultiFrameDataset(
+    in_h = 16 if needs_16 else 32
+    in_w = 64 if needs_16 else 128
+
+    val_ds_16 = MultiFrameDataset(
         root_dir=args.data_dir,
         mode="val",
         split_ratio=config.SPLIT_RATIO,
-        img_height=in_h,
-        img_width=in_w,
+        img_height=16,
+        img_width=64,
         char2idx=config.CHAR2IDX,
         val_split_file=config.VAL_SPLIT_FILE,
     )
 
-    if len(val_ds) == 0:
-        print(f"❌ ERROR: Validation dataset is empty in {args.data_dir}")
-        sys.exit(1)
-
-    val_loader = DataLoader(
-        val_ds,
+    val_loader_16 = DataLoader(
+        val_ds_16,
         batch_size=args.batch_size,
         shuffle=False,
         collate_fn=MultiFrameDataset.collate_fn,
         num_workers=config.NUM_WORKERS,
         pin_memory=(device.type == "cuda"),
     )
-    print(f"📊 Loaded {len(val_ds)} validation tracks ({len(val_loader)} batches, input size: {in_h}x{in_w})")
+
+    val_loader_32 = None
+    if needs_32:
+        val_ds_32 = MultiFrameDataset(
+            root_dir=args.data_dir,
+            mode="val",
+            split_ratio=config.SPLIT_RATIO,
+            img_height=32,
+            img_width=128,
+            char2idx=config.CHAR2IDX,
+            val_split_file=config.VAL_SPLIT_FILE,
+        )
+        val_loader_32 = DataLoader(
+            val_ds_32,
+            batch_size=args.batch_size,
+            shuffle=False,
+            collate_fn=MultiFrameDataset.collate_fn,
+            num_workers=config.NUM_WORKERS,
+            pin_memory=(device.type == "cuda"),
+        )
+
+    print(f"📊 Loaded {len(val_ds_16)} validation tracks (Dual-Stream 16x64: {needs_16}, 32x128: {needs_32})")
 
     # 4. Evaluation Loop
     total_tracks = 0
@@ -317,31 +372,74 @@ def main():
     confidences = []
     correct_flags = []
 
+    iter_32 = iter(val_loader_32) if val_loader_32 is not None else None
+
+    # Default weights for 7-slot ensemble: primary = 0.35, remainder divided equally
+    weights_list = [0.35] + [(1.0 - 0.35) / max(1, len(ensemble_models))] * len(ensemble_models) if ensemble_models else [1.0]
+
     print("🔮 Evaluating Validation Set...")
     with torch.no_grad():
-        for images, targets, target_lengths, labels_text, track_ids in tqdm(val_loader, desc="Evaluation"):
-            images = images.to(device)
+        for batch_16 in tqdm(val_loader_16, desc="Evaluation"):
+            images_16, targets, target_lengths, labels_text, track_ids = batch_16
+            images_16 = images_16.to(device)
 
-            preds_primary = model_forward_with_tta(
+            images_32 = None
+            if iter_32 is not None:
+                images_32 = next(iter_32)[0].to(device)
+
+            primary_preds = model_forward_with_tta(
                 primary_model,
                 primary_arch,
-                images,
+                images_16,
                 use_tta=(not args.no_tta),
+                images_32=images_32,
             )
 
-            if ensemble_models:
-                aux_preds_list = [
-                    model_forward_with_tta(m, a, images, use_tta=(not args.no_tta))
-                    for m, a in ensemble_models
-                ]
-                w_primary = 0.35
-                w_aux = (1.0 - w_primary) / len(aux_preds_list)
-                all_log_probs = [preds_primary + math.log(w_primary)] + [
-                    lp_aux + math.log(w_aux) for lp_aux in aux_preds_list
-                ]
-                preds = torch.logsumexp(torch.stack(all_log_probs, dim=0), dim=0)
+            if not ensemble_models:
+                preds = primary_preds
             else:
-                preds = preds_primary
+                all_raw_preds = [primary_preds]
+                for aux_m, aux_arch in ensemble_models:
+                    aux_p = model_forward_with_tta(
+                        aux_m,
+                        aux_arch,
+                        images_16,
+                        use_tta=(not args.no_tta),
+                        images_32=images_32,
+                    )
+                    all_raw_preds.append(aux_p)
+
+                B_cur = primary_preds.size(0)
+                C_cur = primary_preds.size(2)
+                slot_tensors = []
+                valid_masks = []
+                for idx_m, raw_p in enumerate(all_raw_preds):
+                    s_lp, v_m = extract_7slot_ctc_tensor(
+                        raw_p,
+                        anchor_preds=primary_preds if idx_m > 0 else None,
+                        temperature=0.85,
+                    )
+                    slot_tensors.append(s_lp.to(device))
+                    valid_masks.append(v_m.to(device))
+
+                ens_slots = torch.zeros((B_cur, 7, C_cur), dtype=torch.float32, device=device)
+                for b_i in range(B_cur):
+                    active_lps = []
+                    active_ws = []
+                    for s_t, v_m, w in zip(slot_tensors, valid_masks, weights_list):
+                        if v_m[b_i] and w > 0:
+                            active_lps.append(s_t[b_i])
+                            active_ws.append(w)
+                    if active_lps:
+                        w_sum = sum(active_ws)
+                        stacked_b = torch.stack(
+                            [lp + math.log(w / w_sum) for lp, w in zip(active_lps, active_ws)],
+                            dim=0,
+                        )
+                        ens_slots[b_i] = torch.logsumexp(stacked_b, dim=0)
+                    else:
+                        ens_slots[b_i] = slot_tensors[0][b_i]
+                preds = slots_to_canonical_ctc(ens_slots)
 
             decoded_list = decode_with_confidence(
                 preds,
@@ -360,18 +458,15 @@ def main():
                 if is_correct:
                     exact_matches += 1
 
-                # Edit Distance & CER
                 dist = levenshtein_distance(pred_text, gt_text)
                 total_edit_distance += dist
                 total_characters += len(gt_text)
 
-                # Length breakdown
                 gt_len = len(gt_text)
                 length_acc[gt_len]["total"] += 1
                 if is_correct:
                     length_acc[gt_len]["correct"] += 1
 
-                # Character level precision/recall metrics
                 pred_chars = Counter(pred_text)
                 gt_chars = Counter(gt_text)
 
@@ -385,7 +480,6 @@ def main():
                     char_fp[char] += fp
                     char_fn[char] += fn
 
-                # Misclassified character pairs (if lengths match)
                 if not is_correct and len(pred_text) == len(gt_text):
                     for p_c, g_c in zip(pred_text, gt_text):
                         if p_c != g_c:
@@ -448,17 +542,17 @@ def main():
         "macro_metrics": {
             "precision": round(macro_precision * 100, 2),
             "recall": round(macro_recall * 100, 2),
-            "f1_score": round(macro_f1 * 100, 2)
+            "f1_score": round(macro_f1 * 100, 2),
         },
         "micro_metrics": {
             "precision": round(micro_p * 100, 2),
             "recall": round(micro_r * 100, 2),
-            "f1_score": round(micro_f1 * 100, 2)
+            "f1_score": round(micro_f1 * 100, 2),
         },
         "top_10_character_confusions": [
             {"gt": gt, "pred": pred, "count": count}
             for (gt, pred), count in char_confusion.most_common(10)
-        ]
+        ],
     }
 
     os.makedirs(os.path.dirname(args.output_json), exist_ok=True)
@@ -467,7 +561,7 @@ def main():
 
     # 6. Print Evaluation Report
     print("\n" + "=" * 65)
-    title_suffix = f" + ENSEMBLE ({len(ensemble_models)} models)" if ensemble_models else " SINGLE MODEL"
+    title_suffix = f" + 7-SLOT ENSEMBLE ({len(ensemble_models)} models)" if ensemble_models else " SINGLE MODEL"
     print(f"📊 EXPLICIT EVALUATION REPORT: {primary_arch.upper()}{title_suffix}")
     print("=" * 65)
     print(f"🎯 Exact Match Accuracy (Sequence Acc):  {exact_match_acc:.2f}% ({exact_matches}/{total_tracks})")
