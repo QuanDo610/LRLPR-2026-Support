@@ -237,3 +237,6 @@ dataset/
 data/
 kaggle_push/
 kaggle_push_kernel/
+
+# Paper and LaTeX drafts
+paper/
