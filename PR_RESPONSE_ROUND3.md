@@ -38,19 +38,21 @@ Em xin kính báo cáo chi tiết các kết quả đạt được như sau:
 
 Toàn bộ các mô hình dưới đây được đánh giá độc lập bằng `evaluate.py` trên đúng **999 tracks Scenario-B** (tập blind test thực tế của cuộc thi ICPR 2026, loại trừ hoàn toàn nguy cơ rò rỉ dữ liệu):
 
-| Luồng / Mô hình | Kiến trúc cốt lõi | Kích thước tham số (Params) | P95 Latency (MPS) | Exact Match Acc (%) | Character Error Rate (CER %) | Normalized Edit Acc (%) | Macro F1 (%) | Micro F1 (%) | Ghi chú nghiệm thu |
-|:---|:---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---|
-| **Baseline (Decoupled)** | Standalone SR + ResTran tách rời | ~35.2 M | 8.85 ms | **76.68%** | 6.49% | 93.51% | 92.48% | 93.84% | Baseline chuẩn PR #4 |
-| **Flow 2 v2.1 (`sr_restran`)** | End-to-End Joint StackedSRNet + ResTran | 32.1 M | 8.92 ms | **77.68%** *(+1.00%)* | **5.81%** *(-0.68%)* | **94.19%** | **92.94%** | **94.43%** | Đã kiểm chứng độc lập trên cả Local MPS và Kaggle GPU |
-| **Flow 2 v2.2 (`sr_restran`)** | Joint SR + Self-Consistent SR Supervision + Hard-CTC + TTA | 32.1 M | 8.95 ms | **78.08%** *(+1.40%)* | **5.91%** | **94.09%** | **93.05%** | **94.34%** | Vượt mốc Baseline 77.90% trong Review 3 (`results/sr_restran_flow2_v22_best.pth`) |
-| **Flow 2 v2.3 SWA (`sr_restran`)** | SWA Model Soup + Mercosur Pos4 Grammar + Slide-22 Bayesian Prior | 32.1 M | 8.92 ms | **78.68%** *(+2.00%)* | **5.56%** *(-0.93%)* | **94.44%** | **93.36%** | **94.64%** | **ĐỈNH CAO MÔ HÌNH ĐƠN LẺ** (Giữ nguyên độ trễ 8.92ms, `results/sr_restran_flow2_swa_best.pth`) |
-| **Flow 3 v2.3 (`sr_vit`)** | Pre-LN Hybrid Stem + Transformer ViT 6 lớp + Mercosur Calibration | **14.4 M** *(Nhẹ hơn 55%)* | **6.82 ms** *(Nhanh hơn 24%)* | **75.58%** *(Bứt phá +32%)* | **6.26%** | **93.74%** | **92.20%** | **93.94%** | Thiết kế tối ưu cho Edge-AI (`results/sr_vit_flow3_best.pth`) |
-| **Multi-Flow Synergy Ensemble (v2.3)** | Hiệp đồng Đa kiến trúc CNN-Transformer (Flow 2) + Hybrid ResNet-ViT (Flow 3) | ~81.7 M | ~24.5 ms | **80.38%** *(+3.70%)* | **5.22%** *(-1.27%)* | **94.78%** | **93.71%** | **94.88%** | Vượt ngưỡng 80.00% (803/999 validation tracks, `results/eval_multiflow_ensemble_v23.json`) |
-| **Multi-Paradigm 7-Slot Aligned Ensemble (v2.4)** | Hiệp đồng 4 họ kiến trúc: Flow 2 SWA + Decoupled + Flow 3 ViT + Flow 1 CRNN (T=33) | ~116.9 M | ~28.0 ms | **80.98%** *(+4.30%)* | **5.13%** *(-1.36%)* | **94.87%** | **93.85%** | **94.95%** | **KỶ LỤC LỊCH SỬ TOÀN ĐỀ TÀI (809/999 tracks)** — Chính thức vượt mốc 80.50% của Luận văn, Confidence Gap vọt lên +0.2718 (`results/eval_multiflow_ensemble_v24.json`) |
+| Luồng / Mô hình | Kiến trúc cốt lõi | Kích thước tham số | P95 Latency | Pure Greedy (No TTA) | Pure Greedy (+TTA) | +Uniform Syntax (No TTA) | +Uniform Syntax (+TTA) | Ghi chú nghiệm thu |
+|:---|:---|:---:|:---:|:---:|:---:|:---:|:---:|:---|
+| **Flow 1 Baseline (CRNN)** | CNN + BiLSTM (T=33) | ~8.3 M | 5.20 ms | **76.28%** (CER 6.56%) | **76.58%** (CER 6.55%) | **76.28%** (CER 6.56%) | **76.58%** (CER 6.55%) | Baseline Flow 1 |
+| **Baseline (Decoupled)** | Standalone SR + ResTran tách rời | ~35.2 M | 8.85 ms | **76.68%** (CER 6.49%) | **76.58%** (CER 6.52%) | **76.68%** (CER 6.49%) | **76.58%** (CER 6.51%) | Baseline chuẩn PR #4 |
+| **Flow 2 v2.1 (`sr_restran`)** | End-to-End Joint StackedSRNet + ResTran | 32.1 M | 8.92 ms | **77.68%** (CER 5.81%) | **77.68%** (CER 5.78%) | **77.68%** (CER 5.81%) | **77.68%** (CER 5.78%) | Tái lập 100% trên cả Local MPS & Kaggle |
+| **Flow 2 v2.2 (`sr_restran`)** | Joint SR + Self-Consistent SR Supervision + Hard-CTC | 32.1 M | 8.95 ms | **77.98%** (CER 5.95%) | **77.88%** (CER 5.93%) | **77.98%** (CER 5.95%) | **77.88%** (CER 5.93%) | Vượt baseline (+1.30%) |
+| **Flow 2 SWA (`sr_restran`)** | SWA Model Soup (v22 + plus10 + push80) | 32.1 M | 8.92 ms | **78.68%** (CER 5.58%) | **78.58%** (CER 5.58%) | **78.68%** (CER 5.58%) | **78.58%** (CER 5.58%) | **ĐỈNH CAO MÔ HÌNH ĐƠN LẺ** (+2.00% over Baseline) |
+| **Flow 3 ViT (`sr_vit`)** | Pre-LN Hybrid Stem + Transformer ViT 6 lớp | **14.4 M** *(Nhẹ hơn 55%)* | **6.82 ms** *(Nhanh hơn 24%)* | **75.78%** (CER 6.16%) | **75.68%** (CER 6.22%) | **75.78%** (CER 6.16%) | **75.68%** (CER 6.22%) | Tối ưu biên (Edge AI, >146 FPS) |
+| **Uniform 3-Flow Ensemble** | Flow 2 SWA (1/3) + Flow 3 ViT (1/3) + Decoupled (1/3) | ~81.7 M | ~24.5 ms | **80.38%** (CER 5.21%) | **80.28%** (CER 5.21%) | **80.38%** (CER 5.21%) | **80.28%** (CER 5.21%) | Trọng số đồng đều $1/3$, vượt mốc 80% |
+| **Uniform 4-Paradigm Ensemble** | F1 CRNN (1/4) + F2 SWA (1/4) + F3 ViT (1/4) + Decoupled (1/4) | ~90.0 M | ~28.0 ms | **80.78%** (CER 5.15%) | **80.78%** (CER 5.12%) | **80.78%** (CER 5.15%) | **80.78%** (CER 5.12%) | **VƯỢT MỐC LUẬN VĂN 80.50%** (807/999 tracks, CER kỷ lục 5.12%) với trọng số đồng đều $1/4$ không rò rỉ tập đánh giá! |
 
-> 📌 **Tính tái lập thực nghiệm (Reproducibility):** Kết quả của Flow 2 đạt **77.68% Exact Match** và **5.81% CER** được tái lập thành công 100% trên cả 2 môi trường phần cứng độc lập:
-> 1. Huấn luyện Local Apple Silicon MPS (M1/M2/M3): Checkpoint `results/sr_restran_flow2_plus10_best.pth`.
-> 2. Huấn luyện Kaggle GPU T4 x2 (Đám mây): Checkpoint `results/sr_restran_flow2_kaggle_plus10_best.pth` (Kernel: `dotrongminhquan/lrlpr-flow-2-kaggle-plus10`).
+> 📌 **Tính Liêm chính Khoa học & Tái lập Thực nghiệm (Scientific Integrity & Reproducibility):**
+> 1. Toàn bộ các kết quả trên đều tuân thủ nguyên tắc **Strict Apples-to-Apples**: cột mặc định **Pure Greedy CTC (No TTA)** đo lường năng lực thị giác thuần túy của mạng Neural, không sử dụng bất kỳ phân phối tần suất chữ cái theo vùng miền địa lý nào.
+> 2. Các mô hình được gộp theo không gian 7-slot CTC với **trọng số đồng đều tuyệt đối $1/M$** (`temperature = 1.0`), không thực hiện bất kỳ vòng lặp dò tìm trọng số nào trên tập đánh giá (Zero Data Snooping / Meta-Overfitting).
+> 3. Kết quả của Flow 2 đạt **77.68% Exact Match** và **5.81% CER** được tái lập thành công 100% trên cả 2 môi trường phần cứng độc lập: Local Apple Silicon MPS (`results/sr_restran_flow2_plus10_best.pth`) và Kaggle GPU T4 x2 (`results/sr_restran_flow2_kaggle_plus10_best.pth`).
 
 ---
 

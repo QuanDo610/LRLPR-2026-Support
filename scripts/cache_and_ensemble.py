@@ -1,10 +1,11 @@
-"""Cache model predictions and find optimal 7-slot aligned cross-length ensemble to exceed 83.00% Exact Match."""
+"""Fair scientific evaluation of all trained models and uniform (1/M) 7-slot aligned ensembles across 4 ablation modes."""
 import json
 import math
 import os
-import random
-from collections import Counter, defaultdict
+import sys
 from typing import Dict, List, Tuple
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import numpy as np
 import torch
@@ -21,14 +22,14 @@ from src.utils.postprocess import (
 )
 
 
-def evaluate_slots(
-    ens_slots: torch.Tensor,
+def evaluate_predictions(
+    preds: torch.Tensor,
     labels: List[str],
     config: Config,
-) -> Tuple[float, float, float, float, List[Tuple[str, float]]]:
-    """Decodes a [B, 7, C] slot tensor and computes metrics."""
-    canon_ctc = slots_to_canonical_ctc(ens_slots)
-    decoded_list = decode_with_confidence(canon_ctc, config.IDX2CHAR, use_format_prior=True)
+    use_format_prior: bool = False,
+) -> Tuple[float, float, float, int, List[Tuple[str, float]]]:
+    """Decodes a [B, T, C] CTC log-probability tensor and computes metrics."""
+    decoded_list = decode_with_confidence(preds, config.IDX2CHAR, use_format_prior=use_format_prior)
 
     exact_matches = 0
     total_edit_distance = 0
@@ -46,7 +47,7 @@ def evaluate_slots(
         total_edit_distance += dist
         total_chars += len(gt_text)
 
-    exact_match_acc = (exact_matches / len(labels)) * 100.0
+    exact_match_acc = (exact_matches / len(labels)) * 100.0 if labels else 0.0
     cer = (total_edit_distance / total_chars) * 100.0 if total_chars > 0 else 0.0
 
     corr_c = [c for c, ok in zip(confidences, correct_flags) if ok]
@@ -56,12 +57,42 @@ def evaluate_slots(
     return exact_match_acc, cer, float(gap), exact_matches, decoded_list
 
 
+def uniform_7slot_ensemble(
+    preds_list: List[torch.Tensor],
+    anchor_preds: torch.Tensor,
+) -> torch.Tensor:
+    """Combines M models with strictly uniform 1/M weights in 7-slot aligned CTC space."""
+    slot_tensors = []
+    valid_masks = []
+    for raw_p in preds_list:
+        s_lp, v_m = extract_7slot_ctc_tensor(raw_p, anchor_preds=anchor_preds, temperature=1.0)
+        slot_tensors.append(s_lp)
+        valid_masks.append(v_m)
+
+    B, _, C = slot_tensors[0].shape
+    num_m = len(slot_tensors)
+    uniform_w = 1.0 / num_m
+
+    ens_slots = torch.zeros((B, 7, C), dtype=torch.float32)
+    for b_i in range(B):
+        active_lps = [s_t[b_i] for s_t, v_m in zip(slot_tensors, valid_masks) if v_m[b_i]]
+        if active_lps:
+            w_each = 1.0 / len(active_lps)
+            stacked = torch.stack([lp + math.log(w_each) for lp in active_lps], dim=0)
+            ens_slots[b_i] = torch.logsumexp(stacked, dim=0)
+        else:
+            ens_slots[b_i] = slot_tensors[0][b_i]
+
+    return slots_to_canonical_ctc(ens_slots)
+
+
 def main():
     config = Config()
     device = config.DEVICE
 
+    data_root = "dataset/data/train" if os.path.exists("dataset/data/train") else "data/train"
     val_ds_16 = MultiFrameDataset(
-        root_dir="dataset/data/train",
+        root_dir=data_root,
         mode="val",
         split_ratio=config.SPLIT_RATIO,
         img_height=16,
@@ -78,7 +109,7 @@ def main():
     )
 
     val_ds_32 = MultiFrameDataset(
-        root_dir="dataset/data/train",
+        root_dir=data_root,
         mode="val",
         split_ratio=config.SPLIT_RATIO,
         img_height=32,
@@ -95,21 +126,20 @@ def main():
     )
 
     models_info = [
-        ("swa", "results/sr_restran_flow2_swa_best.pth"),
-        ("v22", "results/sr_restran_flow2_v22_best.pth"),
-        ("plus10", "results/sr_restran_flow2_plus10_best.pth"),
-        ("push80", "results/sr_restran_flow2_push80_best.pth"),
-        ("kaggle", "results/sr_restran_flow2_kaggle_plus10_best.pth"),
+        ("flow1_crnn", "results/crnn_baseline_full_best.pth"),
+        ("flow1_restran", "results/restran_kaggle_gpu_best.pth"),
         ("decoupled", "results/decoupled_restran_best.pth"),
+        ("flow2_v21", "results/sr_restran_flow2_plus10_best.pth"),
+        ("flow2_kaggle", "results/sr_restran_flow2_kaggle_plus10_best.pth"),
+        ("flow2_v22", "results/sr_restran_flow2_v22_best.pth"),
+        ("flow2_swa", "results/sr_restran_flow2_swa_best.pth"),
         ("flow3_vit", "results/sr_vit_flow3_best.pth"),
         ("flow3_v22", "results/sr_vit_flow3_v22_best.pth"),
         ("flow3_swa", "results/sr_vit_flow3_swa_best.pth"),
-        ("flow1_crnn", "results/crnn_baseline_full_best.pth"),
-        ("flow1_restran", "results/restran_kaggle_gpu_best.pth"),
     ]
 
     existing_models = [(name, path) for name, path in models_info if os.path.exists(path)]
-    print(f"📦 Found {len(existing_models)} checkpoints for Phase 1 caching:")
+    print(f"📦 Found {len(existing_models)} checkpoints for scientific ablation evaluation:")
     for name, path in existing_models:
         print(f"  • {name:15s}: {path}")
 
@@ -118,220 +148,94 @@ def main():
         m, arch = load_any_lpr_model(path, config, device)
         loaded_models.append((name, m, arch))
 
-    all_raw_preds = {name: [] for name, _, _ in loaded_models}
-    all_labels = []
+    preds_no_tta: Dict[str, List[torch.Tensor]] = {name: [] for name, _, _ in loaded_models}
+    preds_tta: Dict[str, List[torch.Tensor]] = {name: [] for name, _, _ in loaded_models}
+    all_labels: List[str] = []
 
-    cache_file = "results/cached_val_raw_preds_v24.pt"
-    if os.path.exists(cache_file):
-        print(f"\n📂 Loading existing raw predictions cache from {cache_file}...")
-        cached_data = torch.load(cache_file, map_location="cpu")
-        all_raw_preds = cached_data["raw_preds"]
-        all_labels = cached_data["labels"]
-        # Check if any new models were added
-        missing_models = [name for name, _, _ in loaded_models if name not in all_raw_preds]
-        if missing_models:
-            print(f"   Extracting missing models: {missing_models}")
-            iter_32 = iter(val_loader_32)
-            with torch.no_grad():
-                for batch_16 in tqdm(val_loader_16, desc="Caching Missing"):
-                    images_16, targets, target_lengths, labels_text, track_ids = batch_16
-                    images_16 = images_16.to(device)
-                    images_32 = next(iter_32)[0].to(device)
-                    for name, m, arch in loaded_models:
-                        if name in missing_models:
-                            preds = model_forward_with_tta(m, arch, images_16, use_tta=True, images_32=images_32)
-                            if name not in all_raw_preds:
-                                all_raw_preds[name] = []
-                            all_raw_preds[name].append(preds.cpu())
-            for name in missing_models:
-                if isinstance(all_raw_preds[name], list):
-                    all_raw_preds[name] = torch.cat(all_raw_preds[name], dim=0)
-            torch.save({"raw_preds": all_raw_preds, "labels": all_labels}, cache_file)
-    else:
-        print("\n🔮 Extracting 4-view TTA raw predictions for all models...")
-        iter_32 = iter(val_loader_32)
-        with torch.no_grad():
-            for batch_16 in tqdm(val_loader_16, desc="Caching"):
-                images_16, targets, target_lengths, labels_text, track_ids = batch_16
-                images_16 = images_16.to(device)
-                images_32 = next(iter_32)[0].to(device)
-                all_labels.extend(labels_text)
+    print("\n🔮 Running single-view (No TTA) and 4-view Photometric TTA inference...")
+    iter_32 = iter(val_loader_32)
+    with torch.no_grad():
+        for batch_16 in tqdm(val_loader_16, desc="Evaluating"):
+            images_16, _, _, labels_text, _ = batch_16
+            images_16 = images_16.to(device)
+            images_32 = next(iter_32)[0].to(device)
+            all_labels.extend(labels_text)
 
-                for name, m, arch in loaded_models:
-                    preds = model_forward_with_tta(m, arch, images_16, use_tta=True, images_32=images_32)
-                    all_raw_preds[name].append(preds.cpu())
+            for name, m, arch in loaded_models:
+                p_single = model_forward_with_tta(m, arch, images_16, use_tta=False, images_32=images_32)
+                p_tta = model_forward_with_tta(m, arch, images_16, use_tta=True, images_32=images_32)
+                preds_no_tta[name].append(p_single.cpu())
+                preds_tta[name].append(p_tta.cpu())
 
-        all_raw_preds = {name: torch.cat(all_raw_preds[name], dim=0) for name in all_raw_preds}
-        os.makedirs("results", exist_ok=True)
-        torch.save({"raw_preds": all_raw_preds, "labels": all_labels}, cache_file)
-        print(f"✅ Cached raw predictions saved to {cache_file}")
+    raw_no_tta = {name: torch.cat(preds_no_tta[name], dim=0) for name in preds_no_tta}
+    raw_tta = {name: torch.cat(preds_tta[name], dim=0) for name in preds_tta}
 
-    anchor_name = "swa" if "swa" in all_raw_preds else list(all_raw_preds.keys())[0]
-    anchor_raw = all_raw_preds[anchor_name]
+    ablation_report = {"models": {}, "uniform_ensembles": {}}
 
-    print(f"\n🧩 Projecting into 7-Slot Canonical CTC space with anchor '{anchor_name}'...")
-    slot_dict = {}
-    valid_dict = {}
+    print("\n" + "=" * 112)
+    print(f"{'Model / Paradigm':20s} | {'Pure Greedy (No TTA)':21s} | {'Pure Greedy (+TTA)':21s} | {'+Uniform Syntax (NoTTA)':21s} | {'+Uniform Syntax (+TTA)':21s}")
+    print("=" * 112)
 
-    tau = 0.85
-    for name in all_raw_preds:
-        raw_p = all_raw_preds[name]
-        s_lp, v_m = extract_7slot_ctc_tensor(raw_p, anchor_preds=anchor_raw, temperature=tau)
-        slot_dict[name] = s_lp
-        valid_dict[name] = v_m
+    for name in raw_no_tta:
+        a1, cer1, g1, c1, _ = evaluate_predictions(raw_no_tta[name], all_labels, config, use_format_prior=False)
+        a2, cer2, g2, c2, _ = evaluate_predictions(raw_tta[name], all_labels, config, use_format_prior=False)
+        a3, cer3, g3, c3, _ = evaluate_predictions(raw_no_tta[name], all_labels, config, use_format_prior=True)
+        a4, cer4, g4, c4, _ = evaluate_predictions(raw_tta[name], all_labels, config, use_format_prior=True)
 
-    print("\n" + "=" * 65)
-    print("📊 INDIVIDUAL MODEL BASELINES (IN 7-SLOT CTC SPACE):")
-    print("=" * 65)
-    single_accs = {}
-    for name in slot_dict:
-        acc, cer, gap, corr, _ = evaluate_slots(slot_dict[name], all_labels, config)
-        single_accs[name] = acc
-        v_cnt = int(valid_dict[name].sum().item())
-        print(f"  • {name:15s}: {acc:.2f}% ({corr}/{len(all_labels)}) | CER: {cer:.2f}% | Gap: {gap:+.4f} | Valid: {v_cnt}/999")
-    print("=" * 65)
+        print(
+            f"{name:20s} | {a1:6.2f}% ({c1:3d}, {cer1:4.2f}%) "
+            f"| {a2:6.2f}% ({c2:3d}, {cer2:4.2f}%) "
+            f"| {a3:6.2f}% ({c3:3d}, {cer3:4.2f}%) "
+            f"| {a4:6.2f}% ({c4:3d}, {cer4:4.2f}%)"
+        )
+        ablation_report["models"][name] = {
+            "pure_greedy_no_tta": {"acc": round(a1, 2), "matches": c1, "cer": round(cer1, 2), "gap": round(g1, 4)},
+            "pure_greedy_tta": {"acc": round(a2, 2), "matches": c2, "cer": round(cer2, 2), "gap": round(g2, 4)},
+            "uniform_syntax_no_tta": {"acc": round(a3, 2), "matches": c3, "cer": round(cer3, 2), "gap": round(g3, 4)},
+            "uniform_syntax_tta": {"acc": round(a4, 2), "matches": c4, "cer": round(cer4, 2), "gap": round(g4, 4)},
+        }
 
-    names = list(slot_dict.keys())
-    B = len(all_labels)
-    C = slot_dict[names[0]].size(2)
+    # Evaluate Strictly Uniform (1/M) Multi-Paradigm Ensembles (1 representative per paradigm)
+    anchor_key = "flow2_swa" if "flow2_swa" in raw_tta else list(raw_tta.keys())[0]
+    paradigm_combos = [
+        ("Uniform_3Flow (F2+F3+Dec)", ["flow2_swa", "flow3_vit", "decoupled"]),
+        ("Uniform_4Paradigm (F1+F2+F3+Dec)", ["flow2_swa", "flow3_vit", "decoupled", "flow1_crnn"]),
+        ("Uniform_5Model (F1+F2_swa+F2_v22+F3+Dec)", ["flow2_swa", "flow2_v22", "flow3_vit", "decoupled", "flow1_crnn"]),
+    ]
 
-    # Convert slot tensors to float32
-    slots_list = [slot_dict[n] for n in names]
-    valids_list = [valid_dict[n] for n in names]
+    print("-" * 112)
+    for ens_title, keys in paradigm_combos:
+        avail_keys = [k for k in keys if k in raw_tta]
+        if len(avail_keys) >= 2:
+            ens_no_tta = uniform_7slot_ensemble([raw_no_tta[k] for k in avail_keys], raw_no_tta[anchor_key])
+            ens_tta = uniform_7slot_ensemble([raw_tta[k] for k in avail_keys], raw_tta[anchor_key])
 
-    print("\n🔍 Running Simplex Coordinate Ascent & Dirichlet Search on 7-Slot space...")
+            a1, cer1, g1, c1, _ = evaluate_predictions(ens_no_tta, all_labels, config, use_format_prior=False)
+            a2, cer2, g2, c2, _ = evaluate_predictions(ens_tta, all_labels, config, use_format_prior=False)
+            a3, cer3, g3, c3, _ = evaluate_predictions(ens_no_tta, all_labels, config, use_format_prior=True)
+            a4, cer4, g4, c4, _ = evaluate_predictions(ens_tta, all_labels, config, use_format_prior=True)
 
-    best_acc = 0.0
-    best_weights = None
-    best_cer = 100.0
-    best_gap = 0.0
-    best_corr = 0
-    best_decoded = None
+            print(
+                f"{ens_title[:20]:20s} | {a1:6.2f}% ({c1:3d}, {cer1:4.2f}%) "
+                f"| {a2:6.2f}% ({c2:3d}, {cer2:4.2f}%) "
+                f"| {a3:6.2f}% ({c3:3d}, {cer3:4.2f}%) "
+                f"| {a4:6.2f}% ({c4:3d}, {cer4:4.2f}%)"
+            )
+            ablation_report["uniform_ensembles"][ens_title] = {
+                "members": avail_keys,
+                "weights": [round(1.0 / len(avail_keys), 4)] * len(avail_keys),
+                "pure_greedy_no_tta": {"acc": round(a1, 2), "matches": c1, "cer": round(cer1, 2), "gap": round(g1, 4)},
+                "pure_greedy_tta": {"acc": round(a2, 2), "matches": c2, "cer": round(cer2, 2), "gap": round(g2, 4)},
+                "uniform_syntax_no_tta": {"acc": round(a3, 2), "matches": c3, "cer": round(cer3, 2), "gap": round(g3, 4)},
+                "uniform_syntax_tta": {"acc": round(a4, 2), "matches": c4, "cer": round(cer4, 2), "gap": round(g4, 4)},
+            }
+    print("=" * 112)
 
-    def test_weights(weights: List[float]) -> Tuple[float, float, float, int, list]:
-        ens_slots = torch.zeros((B, 7, C), dtype=torch.float32)
-        for b_i in range(B):
-            active_lps = []
-            active_ws = []
-            for s_t, v_m, w in zip(slots_list, valids_list, weights):
-                if v_m[b_i] and w > 0:
-                    active_lps.append(s_t[b_i])
-                    active_ws.append(w)
-            if active_lps:
-                w_sum = sum(active_ws)
-                stacked = torch.stack([lp + math.log(w / w_sum) for lp, w in zip(active_lps, active_ws)], dim=0)
-                ens_slots[b_i] = torch.logsumexp(stacked, dim=0)
-            else:
-                ens_slots[b_i] = slots_list[0][b_i]
-        return evaluate_slots(ens_slots, all_labels, config)
-
-    # 1. Equal-weight combinations (k = 2 to min(6, len(names)))
-    import itertools
-    for k in [2, 3, 4, 5, 6]:
-        if k > len(names):
-            break
-        for combo in itertools.combinations(range(len(names)), k):
-            w = [0.0] * len(names)
-            for idx in combo:
-                w[idx] = 1.0 / k
-            acc, cer, gap, corr, dec = test_weights(w)
-            if acc > best_acc:
-                best_acc = acc
-                best_weights = list(w)
-                best_cer = cer
-                best_gap = gap
-                best_corr = corr
-                best_decoded = dec
-                active_str = ", ".join([f"{names[i]}: {w[i]:.2f}" for i in combo])
-                print(f"  🎯 NEW PEAK: {acc:.2f}% ({corr}/999) | CER: {cer:.2f}% | Combo: [{active_str}]")
-
-    # 2. Dirichlet Random Exploration (300 iterations)
-    random.seed(42)
-    np.random.seed(42)
-    for _ in range(300):
-        # Pick 3 to 7 models
-        num_m = random.randint(3, min(7, len(names)))
-        chosen_indices = random.sample(range(len(names)), num_m)
-        dirichlet_weights = np.random.dirichlet(np.ones(num_m))
-        w = [0.0] * len(names)
-        for idx, dw in zip(chosen_indices, dirichlet_weights):
-            w[idx] = float(dw)
-        acc, cer, gap, corr, dec = test_weights(w)
-        if acc > best_acc:
-            best_acc = acc
-            best_weights = list(w)
-            best_cer = cer
-            best_gap = gap
-            best_corr = corr
-            best_decoded = dec
-            active_str = ", ".join([f"{names[i]}: {w[i]:.2f}" for i in chosen_indices if w[i] > 0.03])
-            print(f"  🚀 DIRICHLET PEAK: {acc:.2f}% ({corr}/999) | CER: {cer:.2f}% | Weights: [{active_str}]")
-
-    # 3. Fine-tuning Coordinate Ascent around best weights
-    if best_weights is not None:
-        print("\n🔧 Refining around best weights with Coordinate Ascent...")
-        current_w = np.array(best_weights, dtype=np.float32)
-        improved = True
-        step = 0.02
-        rounds = 0
-        while improved and rounds < 5:
-            improved = False
-            rounds += 1
-            for i in range(len(names)):
-                for delta in [-step, step]:
-                    cand_w = current_w.copy()
-                    cand_w[i] = max(0.0, cand_w[i] + delta)
-                    s = cand_w.sum()
-                    if s <= 0:
-                        continue
-                    cand_w /= s
-                    acc, cer, gap, corr, dec = test_weights(cand_w.tolist())
-                    if acc > best_acc:
-                        best_acc = acc
-                        best_weights = cand_w.tolist()
-                        best_cer = cer
-                        best_gap = gap
-                        best_corr = corr
-                        best_decoded = dec
-                        current_w = cand_w
-                        improved = True
-                        print(f"  ✨ COORD PEAK: {acc:.2f}% ({corr}/999) | CER: {cer:.2f}% | Gap: {gap:+.4f}")
-
-    print("\n" + "=" * 65)
-    print(f"🏆 GLOBAL OPTIMAL ENSEMBLE RESULT (PHASE 1):")
-    print("=" * 65)
-    print(f"🎯 Exact Match Accuracy: {best_acc:.2f}% ({best_corr}/{len(all_labels)} tracks)")
-    print(f"🔤 Character Error Rate: {best_cer:.2f}%")
-    print(f"📈 Confidence Gap:       {best_gap:+.4f}")
-    print("\n📋 Optimal Model Weight Distribution:")
-    for name, w in zip(names, best_weights):
-        if w > 0.01:
-            print(f"   • {name:15s}: {w*100:.2f}%")
-    print("=" * 65)
-
-    # Save output json and submission txt
-    summary = {
-        "ensemble_type": "7_slot_aligned_cross_length_ensemble",
-        "exact_match_accuracy": round(best_acc, 2),
-        "total_tracks": len(all_labels),
-        "exact_matches": best_corr,
-        "cer": round(best_cer, 2),
-        "confidence_gap": round(best_gap, 4),
-        "weights": {name: round(w, 4) for name, w in zip(names, best_weights) if w > 0.005},
-        "temperature": tau,
-    }
-
-    with open("results/eval_multiflow_ensemble_v24.json", "w") as f:
-        json.dump(summary, f, indent=2)
-    print("💾 Saved results to results/eval_multiflow_ensemble_v24.json")
-
-    with open("dataset/data/val_tracks.json") as f:
-        val_tracks = json.load(f)
-
-    with open("results/submission_multiflow_ensemble_v24.txt", "w") as f:
-        for t_id, (pred_str, conf) in zip(val_tracks, best_decoded):
-            f.write(f"{t_id},{pred_str};{conf:.4f}\n")
-    print("💾 Saved submission to results/submission_multiflow_ensemble_v24.txt")
+    os.makedirs("results", exist_ok=True)
+    out_path = "results/eval_scientific_ablation_v25.json"
+    with open(out_path, "w") as f:
+        json.dump(ablation_report, f, indent=2)
+    print(f"\n💾 Saved complete scientific ablation table to {out_path}")
 
 
 if __name__ == "__main__":

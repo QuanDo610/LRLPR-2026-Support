@@ -92,9 +92,9 @@ def parse_args():
         help="Disable STN module",
     )
     parser.add_argument(
-        "--no-format-prior",
+        "--use-format-prior",
         action="store_true",
-        help="Disable 7-character plate format grammar constraint in decoding",
+        help="Enable uniform 7-character plate format grammar constraint in decoding (default: False, Pure Greedy CTC)",
     )
     parser.add_argument(
         "--no-tta",
@@ -240,25 +240,6 @@ def model_forward_with_tta(
     preds_soft = model(torch.clamp(in_imgs * 0.92, -1.0, 1.0))
     preds_unsharp = model(_unsharp_mask_batch(in_imgs, amount=0.25))
 
-    if arch == "sr_vit" and F_cnt >= 5:
-        # Multi-Anchor Temporal TTA: let Frame 1 and Frame 3 also act as the center query frame
-        preds_f1 = model(in_imgs[:, [0, 2, 1, 3, 4], :, :, :])
-        preds_f3 = model(in_imgs[:, [0, 1, 3, 2, 4], :, :, :])
-        return torch.logsumexp(
-            torch.stack(
-                [
-                    preds_orig + math.log(0.40),
-                    preds_sharp + math.log(0.18),
-                    preds_soft + math.log(0.12),
-                    preds_unsharp + math.log(0.14),
-                    preds_f1 + math.log(0.08),
-                    preds_f3 + math.log(0.08),
-                ],
-                dim=0,
-            ),
-            dim=0,
-        )
-
     return torch.logsumexp(
         torch.stack(
             [
@@ -374,8 +355,9 @@ def main():
 
     iter_32 = iter(val_loader_32) if val_loader_32 is not None else None
 
-    # Default weights for 7-slot ensemble: primary = 0.35, remainder divided equally
-    weights_list = [0.35] + [(1.0 - 0.35) / max(1, len(ensemble_models))] * len(ensemble_models) if ensemble_models else [1.0]
+    # Uniform 1/M weights for 7-slot ensemble
+    num_total_models = 1 + len(ensemble_models)
+    weights_list = [1.0 / num_total_models] * num_total_models
 
     print("🔮 Evaluating Validation Set...")
     with torch.no_grad():
@@ -417,7 +399,7 @@ def main():
                     s_lp, v_m = extract_7slot_ctc_tensor(
                         raw_p,
                         anchor_preds=primary_preds if idx_m > 0 else None,
-                        temperature=0.85,
+                        temperature=1.0,
                     )
                     slot_tensors.append(s_lp.to(device))
                     valid_masks.append(v_m.to(device))
@@ -444,7 +426,7 @@ def main():
             decoded_list = decode_with_confidence(
                 preds,
                 config.IDX2CHAR,
-                use_format_prior=(not args.no_format_prior),
+                use_format_prior=args.use_format_prior,
             )
 
             for i, (pred_text, conf) in enumerate(decoded_list):

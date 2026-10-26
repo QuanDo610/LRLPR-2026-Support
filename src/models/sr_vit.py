@@ -30,9 +30,7 @@ class MultiFrameCrossAttentionFusion(nn.Module):
         features_4d = features.reshape(B, num_frames, N, C)
 
         center_idx = num_frames // 2
-        Q_center = features_4d[:, center_idx, :, :]       # [B, N, C]
-        Q_mean = features_4d.mean(dim=1)                  # [B, N, C]
-        Q = 0.6 * Q_center + 0.4 * Q_mean                 # [B, N, C] - Dual-Query temporal stabilization
+        Q = features_4d[:, center_idx, :, :]              # [B, N, C]
         KV = features_4d.reshape(B, num_frames * N, C)    # [B, F*N, C]
 
         attn_out, _ = self.cross_attn(Q, KV, KV)
