@@ -189,6 +189,7 @@ def load_any_lpr_model(
     critical_missing = [
         k for k in missing
         if k not in ["sr_net.res_scale_gate", "ocr_net.stn.identity_theta", "stn.identity_theta"]
+        and not k.startswith("sr_net.temporal_sr_fusion.")
     ]
     if critical_missing:
         print(f"⚠️ [{os.path.basename(ckpt_path)}] Missing {len(critical_missing)} keys: {critical_missing[:3]}...")

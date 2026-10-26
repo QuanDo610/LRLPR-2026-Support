@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+
 class CALayer(nn.Module):
     """Channel Attention (CA) Layer from RCAN."""
     def __init__(self, channel: int, reduction: int = 16):
@@ -18,6 +19,7 @@ class CALayer(nn.Module):
         y = self.avg_pool(x)
         y = self.conv_du(y)
         return x * y
+
 
 class RCAB(nn.Module):
     """Residual Channel Attention Block (RCAB) - EDSR style without BN + CALayer."""
@@ -36,9 +38,52 @@ class RCAB(nn.Module):
         res += x
         return res
 
+
+class CrossFrameTemporalSRFusion(nn.Module):
+    """
+    Multi-Frame Spatio-Temporal Feature Alignment & Fusion for Super-Resolution.
+    Exchanges complementary sub-pixel stroke information across the N frames of a track
+    prior to PixelShuffle upsampling. Zero-initialized output projection preserves
+    100% backward compatibility with existing checkpoints at Epoch 0.
+    """
+    def __init__(self, channels: int = 64):
+        super().__init__()
+        self.spatial_align = nn.Sequential(
+            nn.Conv2d(channels * 2, channels, kernel_size=3, padding=1, groups=channels, bias=True),
+            nn.GELU(),
+            nn.Conv2d(channels, channels, kernel_size=1, bias=True),
+        )
+        self.attn_gate = nn.Sequential(
+            nn.Conv2d(channels * 2, channels, kernel_size=1, bias=True),
+            nn.Sigmoid(),
+        )
+        self.out_proj = nn.Conv2d(channels, channels, kernel_size=1, bias=True)
+        nn.init.zeros_(self.out_proj.weight)
+        nn.init.zeros_(self.out_proj.bias)
+
+    def forward(self, x: torch.Tensor, num_frames: int = 5) -> torch.Tensor:
+        BN, C, H, W = x.size()
+        if num_frames <= 1 or BN % num_frames != 0:
+            return x
+        B = BN // num_frames
+        feat = x.view(B, num_frames, C, H, W)
+
+        # Pairwise cross-frame alignment between target frame i and support frames j
+        f_i = feat.unsqueeze(2).expand(B, num_frames, num_frames, C, H, W)
+        f_j = feat.unsqueeze(1).expand(B, num_frames, num_frames, C, H, W)
+        pairs = torch.cat([f_i, f_j], dim=3).reshape(B * num_frames * num_frames, C * 2, H, W)
+
+        aligned = self.spatial_align(pairs).view(B, num_frames, num_frames, C, H, W)
+        weights = self.attn_gate(pairs).view(B, num_frames, num_frames, C, H, W)
+        weights = weights / (weights.sum(dim=2, keepdim=True) + 1e-6)
+
+        fused = (aligned * weights).sum(dim=2).reshape(BN, C, H, W)
+        return x + self.out_proj(fused)
+
+
 class StackedSRNet(nn.Module):
     """
-    Frame-Parallel Super-Resolution Network.
+    Multi-Frame Super-Resolution Network with Cross-Frame Spatio-Temporal Alignment.
     Input: [Batch, Frames, 3, H, W] -> Output: [Batch, Frames, 3, H*scale, W*scale]
     Or Input: [Batch*Frames, 3, H, W] -> Output: [Batch*Frames, 3, H*scale, W*scale]
     """
@@ -53,56 +98,53 @@ class StackedSRNet(nn.Module):
         super(StackedSRNet, self).__init__()
         self.num_frames = num_frames
         self.scale_factor = scale_factor
-        
-        # Initial feature extraction (no more 15-channel stacking)
+
+        # Initial feature extraction
         self.head = nn.Conv2d(in_channels, base_channels, 3, padding=1, bias=True)
-        
+
         # Residual body with RCAB blocks
         self.body = nn.Sequential(*[
             RCAB(base_channels, base_channels, reduction=16) for _ in range(num_blocks)
         ])
-        
+
         self.conv_body = nn.Conv2d(base_channels, base_channels, 3, padding=1, bias=True)
-        
+
+        # Cross-frame spatio-temporal alignment before upsampling
+        self.temporal_sr_fusion = CrossFrameTemporalSRFusion(base_channels)
+
         # Upsampling (PixelShuffle)
         self.upsample = nn.Sequential(
             nn.Conv2d(base_channels, base_channels * (scale_factor ** 2), 3, padding=1, bias=True),
             nn.PixelShuffle(scale_factor),
             nn.ReLU(inplace=True)
         )
-        
+
         # Final reconstruction layer
         self.tail = nn.Conv2d(base_channels, 3, 3, padding=1, bias=True)
-        # Learnable residual scaling gate (1.0 for pretrained SR, 0.05 for random-SR warmstart)
         self.res_scale_gate = nn.Parameter(torch.ones(1))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-            x: Input tensor of shape [B, N, C, H, W] or [B*N, C, H, W].
-        Returns:
-            HR image tensor of shape [B, N, C, H*scale, W*scale] or [B*N, C, H*scale, W*scale].
-        """
         is_5d = x.dim() == 5
+        n_frames = x.size(1) if is_5d else self.num_frames
         if is_5d:
             B, N, C, H, W = x.size()
             x = x.view(B * N, C, H, W)
-            
+
         # Global residual connection via bicubic interpolation
         base = F.interpolate(x, scale_factor=self.scale_factor, mode='bicubic', align_corners=False)
-        
+
         feat = self.head(x)
         res = self.body(feat)
         res = self.conv_body(res)
-        res += feat
-        
+        if is_5d:
+            res = self.temporal_sr_fusion(res, num_frames=n_frames)
+        res = res + feat
+
         out = self.tail(self.upsample(res))
-        
-        # Add gated SR residual to bicubic base and clamp to [-1, 1]
         out = torch.clamp(base + self.res_scale_gate * out, -1.0, 1.0)
-        
+
         if is_5d:
             _, C_out, H_out, W_out = out.size()
             out = out.view(B, N, C_out, H_out, W_out)
-            
+
         return out

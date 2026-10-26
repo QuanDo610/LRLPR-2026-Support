@@ -18,6 +18,8 @@ from src.data.transforms import (
     get_val_transforms,
     get_degradation_transforms,
     get_light_transforms,
+    get_hr_sync_transforms,
+    get_lr_post_degrade_transforms,
 )
 
 
@@ -68,6 +70,9 @@ class MultiFrameDataset(Dataset):
         self.augmentation_level = augmentation_level
         self.is_test = is_test
         self.full_train = full_train
+        self.return_hr = return_hr
+        self.hr_height = 32
+        self.hr_width = 128
         
         if mode == 'train':
             # Training: apply augmentation on the fly
@@ -76,10 +81,22 @@ class MultiFrameDataset(Dataset):
             else:
                 self.transform = get_train_transforms(img_height, img_width)
             self.degrade = get_degradation_transforms()
+            self.hr_sync_transform = (
+                get_hr_sync_transforms(self.hr_height, self.hr_width)
+                if augmentation_level != "light"
+                else None
+            )
+            self.lr_post_transform = get_lr_post_degrade_transforms(
+                img_height, img_width, apply_dropout=(augmentation_level != "light")
+            )
+            self.hr_norm_transform = get_val_transforms(self.hr_height, self.hr_width)
         else:
             # Validation or test: only resize and normalize
             self.transform = get_val_transforms(img_height, img_width)
             self.degrade = None
+            self.hr_sync_transform = None
+            self.lr_post_transform = None
+            self.hr_norm_transform = None
 
         print(f"[{mode.upper()}] Scanning: {root_dir}")
         abs_root = os.path.abspath(root_dir)
@@ -287,24 +304,45 @@ class MultiFrameDataset(Dataset):
             raw_images = [np.zeros((load_h, load_w, 3), dtype=np.uint8) for _ in range(5)]
             num_frames = 5
 
-        # 1. Apply degradation if synthetic (coherently across multi-frame if supported)
-        if is_synthetic and self.degrade:
-            if num_frames > 1 and hasattr(self.degrade, 'additional_targets') and len(self.degrade.additional_targets) >= num_frames - 1:
-                deg_targets = {f'image{i}': raw_images[i] for i in range(1, num_frames)}
-                deg_res = self.degrade(image=raw_images[0], **deg_targets)
-                raw_images = [deg_res['image']] + [deg_res[f'image{i}'] for i in range(1, num_frames)]
+        def _apply_multi_frame(t, imgs):
+            if num_frames > 1 and hasattr(t, 'additional_targets') and len(t.additional_targets) >= num_frames - 1:
+                t_dict = {f'image{i}': imgs[i] for i in range(1, num_frames)}
+                res = t(image=imgs[0], **t_dict)
+                return [res['image']] + [res[f'image{i}'] for i in range(1, num_frames)]
+            return [t(image=img)['image'] for img in imgs]
+
+        if self.return_hr:
+            if is_synthetic and self.degrade:
+                # 1. Clean HR synchronized geometric & photometric transform on (32, 128)
+                if self.hr_sync_transform is not None:
+                    clean_hr = _apply_multi_frame(self.hr_sync_transform, raw_images)
+                else:
+                    clean_hr = [cv2.resize(img, (self.hr_width, self.hr_height)) for img in raw_images]
+
+                # 2. Normalize clean HR to [-1, 1] tensor
+                hr_norm_list = _apply_multi_frame(self.hr_norm_transform, clean_hr)
+                hr_tensor = torch.stack(hr_norm_list, dim=0)
+                has_hr = True
+
+                # 3. Degrade clean HR
+                deg_hr = _apply_multi_frame(self.degrade, clean_hr)
+
+                # 4. Downsample to target LR size (16, 64) and apply dropout
+                lr_list = _apply_multi_frame(self.lr_post_transform, deg_hr)
+                images_tensor = torch.stack(lr_list, dim=0)
             else:
-                raw_images = [self.degrade(image=img)['image'] for img in raw_images]
-
-        # 2. Apply transform (synchronously across frames to strictly preserve temporal coherence)
-        if num_frames > 1 and hasattr(self.transform, 'additional_targets') and len(self.transform.additional_targets) >= num_frames - 1:
-            targets = {f'image{i}': raw_images[i] for i in range(1, num_frames)}
-            res = self.transform(image=raw_images[0], **targets)
-            images_list = [res['image']] + [res[f'image{i}'] for i in range(1, num_frames)]
+                images_list = _apply_multi_frame(self.transform, raw_images)
+                images_tensor = torch.stack(images_list, dim=0)
+                hr_tensor = torch.zeros((num_frames, 3, self.hr_height, self.hr_width), dtype=torch.float32)
+                has_hr = False
         else:
-            images_list = [self.transform(image=img)['image'] for img in raw_images]
+            # 1. Apply degradation if synthetic (coherently across multi-frame if supported)
+            if is_synthetic and self.degrade:
+                raw_images = _apply_multi_frame(self.degrade, raw_images)
 
-        images_tensor = torch.stack(images_list, dim=0)
+            # 2. Apply transform (synchronously across frames to strictly preserve temporal coherence)
+            images_list = _apply_multi_frame(self.transform, raw_images)
+            images_tensor = torch.stack(images_list, dim=0)
         
         # Handle test mode (no labels)
         if self.is_test:
@@ -316,11 +354,22 @@ class MultiFrameDataset(Dataset):
                 target = [0]
             target_len = len(target)
             
+        if self.return_hr:
+            return images_tensor, torch.tensor(target, dtype=torch.long), target_len, label, track_id, hr_tensor, has_hr
         return images_tensor, torch.tensor(target, dtype=torch.long), target_len, label, track_id
 
     @staticmethod
-    def collate_fn(batch: List[Tuple]) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Tuple[str, ...], Tuple[str, ...]]:
-        """Custom collate function for DataLoader."""
+    def collate_fn(batch: List[Tuple]):
+        """Custom collate function for DataLoader (supports 5-tuple and 7-tuple with paired HR)."""
+        if len(batch[0]) == 7:
+            images, targets, target_lengths, labels_text, track_ids, hr_images, has_hr = zip(*batch)
+            images = torch.stack(images, 0)
+            targets = torch.cat(targets)
+            target_lengths = torch.tensor(target_lengths, dtype=torch.long)
+            hr_images = torch.stack(hr_images, 0)
+            has_hr_mask = torch.tensor(has_hr, dtype=torch.bool)
+            return images, targets, target_lengths, labels_text, track_ids, hr_images, has_hr_mask
+
         images, targets, target_lengths, labels_text, track_ids = zip(*batch)
         images = torch.stack(images, 0)
         targets = torch.cat(targets)

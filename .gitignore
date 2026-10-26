@@ -233,8 +233,8 @@ GEMINI.md
 *.zip
 __pycache__
 .venv
-dataset/
-data/
+/dataset/
+/data/
 kaggle_push/
 kaggle_push_kernel/
 

@@ -155,7 +155,14 @@ class Trainer:
         epoch_loss = 0.0
         pbar = tqdm(self.train_loader, desc=f"Ep {self.current_epoch + 1}/{self.config.EPOCHS}")
         
-        for images, targets, target_lengths, _, _ in pbar:
+        for batch in pbar:
+            if len(batch) == 7:
+                images, targets, target_lengths, _, _, hr_targets, has_hr_mask = batch
+                hr_targets = hr_targets.to(self.device)
+                has_hr_mask = has_hr_mask.to(self.device)
+            else:
+                images, targets, target_lengths, _, _ = batch
+                hr_targets, has_hr_mask = None, None
             images = images.to(self.device)
             targets = targets.to(self.device)
             
@@ -205,7 +212,6 @@ class Trainer:
                     )
 
                 if sr_images is not None:
-                    # Self-Consistent LR-Downprojection Supervision + Total Variation Regularization (Review 3 Bug #4 Fix)
                     b_sz, f_sz, c_sz, h_sr, w_sr = sr_images.shape
                     sr_flat = sr_images.float().view(b_sz * f_sz, c_sz, h_sr, w_sr)
                     lr_flat = images.float().view(b_sz * f_sz, c_sz, images.size(3), images.size(4))
@@ -217,7 +223,21 @@ class Trainer:
                         torch.mean(torch.abs(sr_flat[:, :, :, 1:] - sr_flat[:, :, :, :-1]))
                         + torch.mean(torch.abs(sr_flat[:, :, 1:, :] - sr_flat[:, :, :-1, :]))
                     )
-                    loss = loss_ctc + 0.20 * loss_lr_consist + 0.01 * loss_tv
+                    loss_hr_paired = torch.tensor(0.0, device=self.device)
+                    if hr_targets is not None and has_hr_mask is not None and has_hr_mask.any():
+                        sr_syn = sr_images[has_hr_mask].float().view(-1, c_sz, h_sr, w_sr)
+                        hr_syn = hr_targets[has_hr_mask].float().view(-1, c_sz, h_sr, w_sr)
+                        loss_hr_l1 = torch.nn.functional.l1_loss(sr_syn, hr_syn)
+                        sr_gx = sr_syn[:, :, :, 1:] - sr_syn[:, :, :, :-1]
+                        hr_gx = hr_syn[:, :, :, 1:] - hr_syn[:, :, :, :-1]
+                        sr_gy = sr_syn[:, :, 1:, :] - sr_syn[:, :, :-1, :]
+                        hr_gy = hr_syn[:, :, 1:, :] - hr_syn[:, :, :-1, :]
+                        loss_hr_edge = (
+                            torch.nn.functional.l1_loss(sr_gx, hr_gx)
+                            + torch.nn.functional.l1_loss(sr_gy, hr_gy)
+                        )
+                        loss_hr_paired = loss_hr_l1 + 0.10 * loss_hr_edge
+                    loss = loss_ctc + 0.20 * loss_lr_consist + 0.50 * loss_hr_paired + 0.01 * loss_tv
                 else:
                     loss = loss_ctc
 

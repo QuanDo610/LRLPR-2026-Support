@@ -95,3 +95,61 @@ def get_val_transforms(
         A.Normalize(mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5)),
         ToTensorV2()
     ], additional_targets=_get_additional_targets(num_additional_frames), is_check_shapes=False)
+
+
+def get_hr_sync_transforms(
+    hr_height: int = 32,
+    hr_width: int = 128,
+    num_additional_frames: int = 4
+) -> A.Compose:
+    """Synchronized geometric & photometric transform on clean HR frames (uint8 -> uint8) before degradation."""
+    return A.Compose([
+        A.Resize(height=hr_height, width=hr_width),
+        A.Affine(
+            scale=(0.95, 1.05),
+            translate_percent=(0.05, 0.05),
+            rotate=(-5, 5),
+            fill=128,
+            p=0.5
+        ),
+        A.Perspective(scale=(0.02, 0.05), p=0.3),
+        A.RandomBrightnessContrast(p=0.5),
+        A.HueSaturationValue(
+            hue_shift_limit=10,
+            sat_shift_limit=20,
+            val_shift_limit=20,
+            p=0.3
+        ),
+        A.Rotate(limit=10, p=0.3),
+        A.ChannelShuffle(p=0.3),
+    ], additional_targets=_get_additional_targets(num_additional_frames), is_check_shapes=False)
+
+
+def get_lr_post_degrade_transforms(
+    img_height: int = 16,
+    img_width: int = 64,
+    num_additional_frames: int = 4,
+    apply_dropout: bool = True,
+) -> A.Compose:
+    """Downsamples degraded HR frames to target LR size, applies CoarseDropout, and normalizes to [-1, 1]."""
+    hole_h_min = max(2, int(round(4 * img_height / 32)))
+    hole_h_max = max(4, int(round(8 * img_height / 32)))
+    hole_w_min = max(2, int(round(4 * img_width / 128)))
+    hole_w_max = max(4, int(round(8 * img_width / 128)))
+
+    ops = [A.Resize(height=img_height, width=img_width)]
+    if apply_dropout:
+        ops.append(
+            A.CoarseDropout(
+                num_holes_range=(2, 5),
+                hole_height_range=(hole_h_min, hole_h_max),
+                hole_width_range=(hole_w_min, hole_w_max),
+                p=0.3
+            )
+        )
+    ops.extend([
+        A.Normalize(mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5)),
+        ToTensorV2(),
+    ])
+    return A.Compose(ops, additional_targets=_get_additional_targets(num_additional_frames), is_check_shapes=False)
+

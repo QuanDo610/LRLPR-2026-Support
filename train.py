@@ -278,6 +278,7 @@ def main():
             root_dir=config.DATA_ROOT,
             mode='train',
             full_train=True,
+            return_hr=(config.MODEL_TYPE in ["sr_restran", "sr_vit"]),
             **common_ds_params
         )
         
@@ -310,12 +311,14 @@ def main():
         train_ds = MultiFrameDataset(
             root_dir=config.DATA_ROOT,
             mode='train',
+            return_hr=(config.MODEL_TYPE in ["sr_restran", "sr_vit"]),
             **common_ds_params
         )
         
         val_ds = MultiFrameDataset(
             root_dir=config.DATA_ROOT,
             mode='val',
+            return_hr=False,
             **common_ds_params
         )
         
